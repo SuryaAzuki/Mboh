@@ -1,0 +1,18 @@
+{
+  "name": "APEX GP // LAN MotoGP 3D",
+  "short_name": "APEX GP",
+  "description": "3D LAN Multiplayer MotoGP Racing Game",
+  "start_url": "/?autostart=0",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#0b0f17",
+  "theme_color": "#dc2626",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

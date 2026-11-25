@@ -1,0 +1,6 @@
+{
+  "name": "APEX GP // LAN MotoGP 3D",
+  "description": "3D LAN Multiplayer MotoGP racing game with real-time WebSocket lobbies, procedural WebGL superbikes, mobile touch controls, and downloadable Android Capacitor APK project export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
