@@ -28,7 +28,23 @@ jobs:
       - name: Init Capacitor Android
         run: |
           npm install --no-save --legacy-peer-deps @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
-          npx cap init "APEX GP LAN MotoGP" "com.apexgp.lanmotogp" --web-dir dist
+          npx cap init "APEX GP LAN MotoGP" "com.apexgp.lanmotogp" --web-dir dist || true
+          rm -f capacitor.config.ts
+          cat << 'EOF' > capacitor.config.json
+          {
+            "appId": "com.apexgp.lanmotogp",
+            "appName": "APEX GP LAN MotoGP",
+            "webDir": "dist",
+            "server": {
+              "androidScheme": "http",
+              "cleartext": true
+            },
+            "android": {
+              "allowMixedContent": true,
+              "backgroundColor": "#0b0f17"
+            }
+          }
+          EOF
           npx cap add android
           npx cap sync android
 
