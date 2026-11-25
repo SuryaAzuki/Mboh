@@ -22,12 +22,12 @@ jobs:
 
       - name: Install Dependencies & Build Web Bundle
         run: |
-          npm install --no-audit --no-fund
+          npm install --legacy-peer-deps --no-audit --no-fund
           npm run build
 
       - name: Init Capacitor Android
         run: |
-          npm install --no-save @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
+          npm install --no-save --legacy-peer-deps @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
           npx cap init "APEX GP LAN MotoGP" "com.apexgp.lanmotogp" --web-dir dist
           npx cap add android
           npx cap sync android
