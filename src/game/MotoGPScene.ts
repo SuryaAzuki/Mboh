@@ -53,6 +53,7 @@ export interface SceneCallbacks {
   onRaceFinish: (results: RaceResultEntry[]) => void;
   onLocalTelemetry?: (state: RiderNetState) => void;
   onTogglePause?: () => void;
+  onCameraModeChange?: (mode: CameraMode) => void;
 }
 
 // Pre-allocated scratch vectors outside animation loop (zero GC)
@@ -107,6 +108,8 @@ export class MotoGPScene {
   private lastHudEmit = 0;
   private lastNetEmit = 0;
   private titlePanTime = 0;
+  private wasBoosting = false;
+  private prevLocalRank = 1;
 
   // Input state
   private keys = new Set<string>();
@@ -159,9 +162,9 @@ export class MotoGPScene {
     this.scene = new THREE.Scene();
     const horizonHex = 0xcfe2f3;
     this.scene.background = new THREE.Color(horizonHex);
-    this.scene.fog = new THREE.FogExp2(horizonHex, 0.0022);
+    this.scene.fog = new THREE.FogExp2(horizonHex, 0.0013);
 
-    this.camera = new THREE.PerspectiveCamera(62, width / height, 0.2, 1200);
+    this.camera = new THREE.PerspectiveCamera(62, width / height, 0.45, 1600);
 
     // Procedural studio reflections for bike metallic alloys & visor clearcoat
     const pmrem = new THREE.PMREMGenerator(this.renderer);
@@ -171,7 +174,7 @@ export class MotoGPScene {
 
     // Daylight Sky Dome
     this.sky = new Sky();
-    this.sky.scale.setScalar(1800);
+    this.sky.scale.setScalar(2600);
     this.scene.add(this.sky);
 
     // Warm/cool 3-point outdoor lighting rig
@@ -232,7 +235,18 @@ export class MotoGPScene {
     this.particleMesh.instanceMatrix.needsUpdate = true;
     this.scene.add(this.particleMesh);
 
-    // Spawn initial showcase grid for Title Screen flyover
+    // Spawn initial 10-rider showcase grid for Title Screen flyover
+    const showcaseAiNames = [
+      'M. Rossi',
+      'F. Bagnaia',
+      'M. Marquez',
+      'J. Martin',
+      'F. Quartararo',
+      'A. Espargaro',
+      'E. Bastianini',
+      'B. Binder',
+      'P. Acosta',
+    ];
     this.setupGrid({
       mode: 'solo',
       bikeClass: 'motogp',
@@ -243,9 +257,15 @@ export class MotoGPScene {
       localLivery: TEAM_LIVERIES[0],
       participants: [
         { id: 'local', name: 'You', livery: TEAM_LIVERIES[0], bikeClass: 'motogp', isPlayer: true, isRemote: false, isAi: false },
-        { id: 'ai-1', name: 'M. Rossi', livery: TEAM_LIVERIES[1], bikeClass: 'motogp', isPlayer: false, isRemote: false, isAi: true },
-        { id: 'ai-2', name: 'K. Rea', livery: TEAM_LIVERIES[2], bikeClass: 'motogp', isPlayer: false, isRemote: false, isAi: true },
-        { id: 'ai-3', name: 'A. Espargaro', livery: TEAM_LIVERIES[3], bikeClass: 'motogp', isPlayer: false, isRemote: false, isAi: true },
+        ...showcaseAiNames.map((name, idx) => ({
+          id: `ai-${idx + 1}`,
+          name,
+          livery: TEAM_LIVERIES[(idx + 1) % TEAM_LIVERIES.length],
+          bikeClass: 'motogp' as BikeClassId,
+          isPlayer: false,
+          isRemote: false,
+          isAi: true,
+        })),
       ],
     });
 
@@ -253,7 +273,8 @@ export class MotoGPScene {
       this.renderer.compile(this.scene, this.camera);
     }
 
-    // Event listeners
+    // Event listeners (also unlock audio on first user pointer interaction for title BGM)
+    window.addEventListener('pointerdown', this.handleFirstInteract, { passive: true });
     window.addEventListener('keydown', this.handleKeyDown);
     window.addEventListener('keyup', this.handleKeyUp);
     window.addEventListener('blur', this.handleBlur);
@@ -281,6 +302,7 @@ export class MotoGPScene {
     const order: CameraMode[] = ['chase', 'helmet', 'tv'];
     const idx = order.indexOf(this.cameraMode);
     this.cameraMode = order[(idx + 1) % order.length];
+    this.callbacks.onCameraModeChange?.(this.cameraMode);
     return this.cameraMode;
   }
 
@@ -295,11 +317,17 @@ export class MotoGPScene {
 
   public setGameState(state: GameScreenState): void {
     this.gameState = state;
-    if (state !== 'playing') {
+    if (state === 'title') {
       this.audio.silenceEngine();
+      this.audio.setBgmMode('title');
       this.clearInputs();
-    } else {
+    } else if (state === 'playing') {
       this.audio.unlock();
+      this.audio.setBgmMode('race');
+    } else {
+      this.audio.silenceEngine();
+      this.audio.setBgmMode('off');
+      this.clearInputs();
     }
   }
 
@@ -317,7 +345,7 @@ export class MotoGPScene {
       this.hemiLight.color.setHex(0xfed7aa);
       this.hemiLight.intensity = 0.65;
       this.scene.background = new THREE.Color(0xe6b89c);
-      this.scene.fog = new THREE.FogExp2(0xe6b89c, 0.0024);
+      this.scene.fog = new THREE.FogExp2(0xe6b89c, 0.0014);
     } else if (mood === 'overcast') {
       const sunVec = new THREE.Vector3().setFromSphericalCoords(1, THREE.MathUtils.degToRad(50), THREE.MathUtils.degToRad(150));
       skyUniforms['turbidity'].value = 9.0;
@@ -330,7 +358,7 @@ export class MotoGPScene {
       this.hemiLight.color.setHex(0xcbd5e1);
       this.hemiLight.intensity = 0.85;
       this.scene.background = new THREE.Color(0xbcc9d8);
-      this.scene.fog = new THREE.FogExp2(0xbcc9d8, 0.0028);
+      this.scene.fog = new THREE.FogExp2(0xbcc9d8, 0.0016);
     } else {
       const sunVec = new THREE.Vector3().setFromSphericalCoords(1, THREE.MathUtils.degToRad(62), THREE.MathUtils.degToRad(140));
       skyUniforms['turbidity'].value = 4.5;
@@ -343,12 +371,13 @@ export class MotoGPScene {
       this.hemiLight.color.setHex(0xdbeafe);
       this.hemiLight.intensity = 0.72;
       this.scene.background = new THREE.Color(0xcfe2f3);
-      this.scene.fog = new THREE.FogExp2(0xcfe2f3, 0.0022);
+      this.scene.fog = new THREE.FogExp2(0xcfe2f3, 0.0013);
     }
   }
 
   public startRace(config: RaceStartConfig): void {
     this.audio.unlock();
+    this.audio.setBgmMode('race');
     this.applySkyMood(config.skyMood ?? 'sunny');
     this.setupGrid(config);
     this.gameState = 'playing';
@@ -357,16 +386,19 @@ export class MotoGPScene {
     this.raceElapsedMs = 0;
     this.trauma = 0;
     this.hitstopTimer = 0;
+    this.wasBoosting = false;
     this.clearInputs();
     this.trackWorld.setStartLights(0, false);
 
-    // Snap camera immediately behind local player bike
+    // Snap camera immediately behind local player bike upright
     const localBike = this.bikes.find((b) => b.id === this.localBikeId) ?? this.bikes[0];
     if (localBike) {
+      this.prevLocalRank = localBike.rank;
       const fwdX = Math.sin(localBike.heading);
       const fwdZ = Math.cos(localBike.heading);
-      this.camera.position.set(localBike.x - fwdX * 5.8, 2.35, localBike.z - fwdZ * 5.8);
-      this.camera.lookAt(localBike.x + fwdX * 8, 1.0, localBike.z + fwdZ * 8);
+      this.camera.up.set(0, 1, 0);
+      this.camera.position.set(localBike.x - fwdX * 4.2, 1.82, localBike.z - fwdZ * 4.2);
+      this.camera.lookAt(localBike.x + fwdX * 14, 1.05, localBike.z + fwdZ * 14);
     }
   }
 
@@ -378,6 +410,17 @@ export class MotoGPScene {
 
     const usedIds = new Set([livery.id]);
     const aiLiveries = TEAM_LIVERIES.filter((l) => !usedIds.has(l.id));
+    const aiNames = [
+      'M. Rossi',
+      'F. Bagnaia',
+      'M. Marquez',
+      'J. Martin',
+      'F. Quartararo',
+      'A. Espargaro',
+      'E. Bastianini',
+      'B. Binder',
+      'P. Acosta',
+    ];
     this.setupGrid({
       mode: 'solo',
       bikeClass,
@@ -387,9 +430,15 @@ export class MotoGPScene {
       localLivery: livery,
       participants: [
         { id: 'local', name: 'You', livery, bikeClass, isPlayer: true, isRemote: false, isAi: false },
-        { id: 'ai-1', name: 'M. Rossi', livery: aiLiveries[0], bikeClass, isPlayer: false, isRemote: false, isAi: true },
-        { id: 'ai-2', name: 'K. Rea', livery: aiLiveries[1], bikeClass, isPlayer: false, isRemote: false, isAi: true },
-        { id: 'ai-3', name: 'A. Espargaro', livery: aiLiveries[2], bikeClass, isPlayer: false, isRemote: false, isAi: true },
+        ...aiNames.map((name, idx) => ({
+          id: `ai-${idx + 1}`,
+          name,
+          livery: aiLiveries[idx % aiLiveries.length],
+          bikeClass,
+          isPlayer: false,
+          isRemote: false,
+          isAi: true,
+        })),
       ],
     });
   }
@@ -563,6 +612,7 @@ export class MotoGPScene {
     // Hero rear-quarter angle showcasing the detailed motorcycle & grandstands across the pit straight
     const camX = gantrySample.x - 5.2 + sway * 2.4;
     const camZ = gantrySample.z - 16.8 + Math.cos(this.titlePanTime * 0.32) * 1.8;
+    this.camera.up.set(0, 1, 0);
     this.camera.position.set(camX, 2.35 + Math.sin(this.titlePanTime * 0.35) * 0.35, camZ);
     this.camera.lookAt(gantrySample.x + 1.8, 1.05, gantrySample.z - 5.2);
 
@@ -688,7 +738,17 @@ export class MotoGPScene {
     updateRaceRankings(this.bikes);
 
     if (localBike) {
-      this.audio.updateEngine(localBike.rpm, localInput.throttle, localBike.isBoosting, true);
+      this.audio.updateEngine(localBike.rpm, localInput.throttle, localBike.isBoosting, true, localBike.bikeClass);
+      this.audio.updateSurfaceSfx(localBike.surface, localBike.speed, canMove);
+      if (localBike.isBoosting && !this.wasBoosting && canMove) {
+        this.audio.playBoostStart();
+      }
+      this.wasBoosting = localBike.isBoosting;
+
+      if (canMove && this.raceElapsedMs > 2500 && localBike.rank < this.prevLocalRank) {
+        this.audio.playOvertakeChime();
+      }
+      this.prevLocalRank = localBike.rank;
     }
 
     this.updateParticles(dt);
@@ -751,13 +811,14 @@ export class MotoGPScene {
   private triggerRaceFinish(): void {
     this.gameState = 'gameover';
     this.audio.silenceEngine();
+    this.audio.setBgmMode('off');
     const sorted = [...this.bikes].sort((a, b) => a.rank - b.rank);
     const results: RaceResultEntry[] = sorted.map((b) => ({
       id: b.id,
       name: b.name,
       livery: b.livery,
       rank: b.rank,
-      finishTimeMs: b.finished ? b.finishTimeMs : Math.round(this.raceElapsedMs + Math.max(800, (this.totalLaps * this.circuit.totalLength - b.totalProgress) * 14)),
+      finishTimeMs: b.finished ? b.finishTimeMs : Math.round(this.raceElapsedMs + Math.max(800, (this.totalLaps * this.circuit.totalLength - b.totalProgress) * 18)),
       bestLapMs: b.bestLapMs,
       topSpeedKmh: b.topSpeedKmh,
       isPlayer: b.isPlayer,
@@ -772,12 +833,13 @@ export class MotoGPScene {
 
     const fwdX = Math.sin(localBike.heading);
     const fwdZ = Math.cos(localBike.heading);
+    this.camera.up.set(0, 1, 0);
 
     if (this.cameraMode === 'chase') {
-      const dist = 5.4 + (localBike.speed / 90) * 1.4;
-      _camTargetPos.set(localBike.x - fwdX * dist, 2.25, localBike.z - fwdZ * dist);
-      _camLookAt.set(localBike.x + fwdX * 10, 1.05, localBike.z + fwdZ * 10);
-      const damp = 1 - Math.exp(-9.5 * dt);
+      const dist = 4.1 + (localBike.speed / 92) * 1.1;
+      _camTargetPos.set(localBike.x - fwdX * dist, 1.82, localBike.z - fwdZ * dist);
+      _camLookAt.set(localBike.x + fwdX * 14, 1.05, localBike.z + fwdZ * 14);
+      const damp = 1 - Math.exp(-10 * dt);
       this.camera.position.lerp(_camTargetPos, damp);
       this.camera.lookAt(_camLookAt);
     } else if (this.cameraMode === 'helmet') {
@@ -785,24 +847,25 @@ export class MotoGPScene {
       const rightX = -fwdZ;
       const rightZ = fwdX;
       this.camera.position.set(
-        localBike.x + fwdX * 0.25 + rightX * leanLat,
-        1.26 - Math.abs(localBike.leanAngle) * 0.18,
-        localBike.z + fwdZ * 0.25 + rightZ * leanLat,
+        localBike.x + fwdX * 0.56 + rightX * leanLat,
+        1.32 - Math.abs(localBike.leanAngle) * 0.15,
+        localBike.z + fwdZ * 0.56 + rightZ * leanLat,
       );
-      _camLookAt.set(localBike.x + fwdX * 18, 0.95, localBike.z + fwdZ * 18);
+      _camLookAt.set(localBike.x + fwdX * 22, 1.02, localBike.z + fwdZ * 22);
       this.camera.lookAt(_camLookAt);
-      this.camera.rotation.z = localBike.leanAngle * 0.35;
+      // Local Z roll in camera space avoids Euler gimbal flip along +Z heading
+      this.camera.rotateZ(-localBike.leanAngle * 0.25);
     } else {
       // Elevated TV Broadcast helicam
-      _camTargetPos.set(localBike.x - fwdX * 11, 7.5, localBike.z - fwdZ * 11);
-      _camLookAt.set(localBike.x + fwdX * 5, 0.8, localBike.z + fwdZ * 5);
-      const damp = 1 - Math.exp(-5.5 * dt);
+      _camTargetPos.set(localBike.x - fwdX * 10.5, 7.2, localBike.z - fwdZ * 10.5);
+      _camLookAt.set(localBike.x + fwdX * 6, 0.85, localBike.z + fwdZ * 6);
+      const damp = 1 - Math.exp(-6.0 * dt);
       this.camera.position.lerp(_camTargetPos, damp);
       this.camera.lookAt(_camLookAt);
     }
 
-    // Dynamic speed FOV kick + gravel rumble / impact trauma shake
-    const targetFov = 62 + (localBike.speed / 92) * 16 + (localBike.isBoosting ? 5 : 0);
+    // Dynamic speed FOV kick + gravel rumble / impact trauma position shake (never flips orientation)
+    const targetFov = 62 + (localBike.speed / 92) * 15 + (localBike.isBoosting ? 5 : 0);
     this.camera.fov = THREE.MathUtils.damp(this.camera.fov, targetFov, 7, dt);
     this.camera.updateProjectionMatrix();
 
@@ -811,8 +874,8 @@ export class MotoGPScene {
     }
     if (this.trauma > 0.001) {
       const shake = this.trauma * this.trauma;
-      this.camera.rotation.z += (Math.random() - 0.5) * 0.08 * shake;
-      this.camera.rotation.x += (Math.random() - 0.5) * 0.06 * shake;
+      this.camera.position.x += (Math.random() - 0.5) * 0.14 * shake;
+      this.camera.position.y += (Math.random() - 0.5) * 0.11 * shake;
       this.trauma = Math.max(0, this.trauma - dt * 1.9);
     }
   }
@@ -882,7 +945,14 @@ export class MotoGPScene {
     this.renderer.setSize(w, h);
   }
 
+  private handleFirstInteract = (): void => {
+    this.audio.unlock();
+    this.audio.setBgmMode(this.gameState === 'title' ? 'title' : this.gameState === 'playing' ? 'race' : 'off');
+    window.removeEventListener('pointerdown', this.handleFirstInteract);
+  };
+
   private handleKeyDown = (e: KeyboardEvent): void => {
+    this.audio.unlock();
     this.keys.add(e.code);
     if (this.gameState === 'playing') {
       if (e.code === 'Escape' || e.code === 'KeyP') {
@@ -915,6 +985,7 @@ export class MotoGPScene {
     this.disposed = true;
     cancelAnimationFrame(this.frameId);
     clearTimeout(this.frameId);
+    window.removeEventListener('pointerdown', this.handleFirstInteract);
     window.removeEventListener('keydown', this.handleKeyDown);
     window.removeEventListener('keyup', this.handleKeyUp);
     window.removeEventListener('blur', this.handleBlur);

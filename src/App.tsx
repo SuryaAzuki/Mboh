@@ -37,7 +37,7 @@ const INITIAL_HUD: HudSnapshot = {
   lap: 1,
   totalLaps: 3,
   rank: 1,
-  totalRiders: 4,
+  totalRiders: 10,
   raceTimeMs: 0,
   currentLapMs: 0,
   bestLapMs: null,
@@ -62,6 +62,7 @@ export default function App() {
   const [riderName, setRiderName] = useState('Rider 1');
   const [hud, setHud] = useState<HudSnapshot>(INITIAL_HUD);
   const [muted, setMuted] = useState(false);
+  const [bgmEnabled, setBgmEnabled] = useState(true);
   const [cameraMode, setCameraMode] = useState<CameraMode>('chase');
   const [touchEnabled, setTouchEnabled] = useState(() =>
     typeof window !== 'undefined'
@@ -110,7 +111,17 @@ export default function App() {
     }) => {
       const usedIds = new Set([selectedLivery.id]);
       const aiLiveries = TEAM_LIVERIES.filter((l) => !usedIds.has(l.id));
-      const aiNames = ['M. Rossi', 'F. Bagnaia', 'K. Nakagami'];
+      const aiNames = [
+        'M. Rossi',
+        'F. Bagnaia',
+        'M. Marquez',
+        'J. Martin',
+        'F. Quartararo',
+        'A. Espargaro',
+        'E. Bastianini',
+        'B. Binder',
+        'P. Acosta',
+      ];
 
       const config: RaceStartConfig = {
         mode: opts.mode,
@@ -135,7 +146,7 @@ export default function App() {
             name,
             livery: aiLiveries[i % aiLiveries.length],
             bikeClass: opts.bikeClass,
-            aiPaceFactor: opts.aiDifficulty + (i % 3) * 0.035,
+            aiPaceFactor: opts.aiDifficulty + ((i % 4) - 1) * 0.025,
             isPlayer: false,
             isRemote: false,
             isAi: true,
@@ -194,14 +205,15 @@ export default function App() {
         };
       });
 
-      if (room.fillWithAi && participants.length < 4) {
+      if (room.fillWithAi && participants.length < 10) {
         const usedLiveries = new Set(participants.map((p) => p.livery.id));
         const avail = TEAM_LIVERIES.filter((l) => !usedLiveries.has(l.id));
+        const aiRoster = ['M. Rossi', 'F. Bagnaia', 'M. Marquez', 'J. Martin', 'F. Quartararo', 'A. Espargaro', 'E. Bastianini', 'B. Binder', 'P. Acosta'];
         let aiIdx = 0;
-        while (participants.length < 4) {
+        while (participants.length < 10) {
           participants.push({
             id: `ai-${aiIdx + 1}`,
-            name: `GP AI #${aiIdx + 1}`,
+            name: aiRoster[aiIdx] ?? `GP AI #${aiIdx + 1}`,
             livery: avail[aiIdx % avail.length] ?? TEAM_LIVERIES[aiIdx % TEAM_LIVERIES.length],
             bikeClass: roomClass,
             isPlayer: false,
@@ -283,6 +295,9 @@ export default function App() {
       },
       onTogglePause: () => {
         setGameState((prev) => (prev === 'playing' ? 'paused' : prev === 'paused' ? 'playing' : prev));
+      },
+      onCameraModeChange: (mode) => {
+        setCameraMode(mode);
       },
     });
     sceneRef.current = scene;
@@ -400,11 +415,16 @@ export default function App() {
           <RaceHud
             hud={hud}
             muted={muted}
+            bgmEnabled={bgmEnabled}
             cameraMode={cameraMode}
             touchEnabled={touchEnabled}
             onToggleMute={() => {
               const next = sceneRef.current?.getAudio().toggleMute() ?? !muted;
               setMuted(next);
+            }}
+            onToggleBgm={() => {
+              const next = sceneRef.current?.getAudio().toggleBgm() ?? !bgmEnabled;
+              setBgmEnabled(next);
             }}
             onCycleCamera={() => {
               const next = sceneRef.current?.cycleCameraMode() ?? 'chase';

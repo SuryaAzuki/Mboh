@@ -3,10 +3,13 @@ import assert from 'node:assert/strict';
 import {
   buildCircuitData,
   classifySurface,
+  CURB_WIDTH,
   getGridSlotTransform,
+  isInsideCircuitLoop,
   projectToTrack,
   sampleTrackAtS,
   START_LINE_S,
+  TRACK_HALF_WIDTH,
   updateLapAndCheckpoints,
 } from './trackMath';
 import {
@@ -19,16 +22,18 @@ import {
 } from './physics';
 import { TEAM_LIVERIES } from './types';
 
-test('circuit spline builds closed loop with valid unit tangents and normals', () => {
-  const circuit = buildCircuitData(480);
-  assert.equal(circuit.samples.length, 480);
-  assert.ok(circuit.totalLength > 800, 'circuit perimeter should exceed 800m');
+test('circuit spline builds closed long GP loop (>2000m) with valid unit tangents and normals', () => {
+  const circuit = buildCircuitData(800);
+  assert.equal(circuit.samples.length, 800);
+  assert.ok(circuit.totalLength > 2000, `circuit perimeter should exceed 2000m, got ${circuit.totalLength}`);
 
   const s0 = sampleTrackAtS(circuit, 0);
   const sWrap = sampleTrackAtS(circuit, circuit.totalLength);
   assert.ok(Math.hypot(s0.x - sWrap.x, s0.z - sWrap.z) < 0.05);
   assert.ok(Math.abs(Math.hypot(s0.tx, s0.tz) - 1) < 1e-4);
   assert.ok(Math.abs(s0.tx * s0.nx + s0.tz * s0.nz) < 1e-4);
+  assert.equal(isInsideCircuitLoop(circuit, circuit.centroid.x, circuit.centroid.z), true);
+  assert.equal(isInsideCircuitLoop(circuit, -500, -500), false);
 });
 
 test('surface classification transitions cleanly from asphalt to curb, gravel, and grass', () => {
@@ -64,9 +69,9 @@ test('lap and checkpoint logic prevents reverse-line crossing cheat and advances
   assert.equal(finish.finishedRace, true);
 });
 
-test('grid slots spawn bikes cleanly on asphalt facing forward down the straight', () => {
-  const circuit = buildCircuitData(480);
-  for (let i = 0; i < 6; i++) {
+test('all 10 grid slots spawn bikes cleanly on asphalt facing forward down the straight', () => {
+  const circuit = buildCircuitData(800);
+  for (let i = 0; i < 10; i++) {
     const slot = getGridSlotTransform(circuit, i);
     const proj = projectToTrack(circuit, slot.x, slot.z, slot.trackS);
     assert.equal(proj.surface, 'asphalt');
@@ -209,5 +214,48 @@ test('Moto3 and MotoGP bike classes have distinct acceleration and top speed cur
     stepBikePhysics(motogp, { throttle: 1, brake: 0, steer: 0, boost: false }, 0.04, circuit, i * 40, 3, true);
   }
   assert.ok(motogp.speed > moto3.speed, `MotoGP (${motogp.speed}) should out-accelerate Moto3 (${moto3.speed})`);
+});
+
+test('AI riders accurately navigate the full 2,550m circuit without steering off-track', () => {
+  const circuit = buildCircuitData(800);
+  const aiBikes = Array.from({ length: 5 }, (_, idx) =>
+    createInitialBikeState({
+      id: `ai-${idx + 1}`,
+      name: `AI ${idx + 1}`,
+      livery: TEAM_LIVERIES[idx],
+      bikeClass: idx === 0 ? 'moto3' : 'motogp',
+      slotIndex: idx * 2,
+      circuit,
+      isPlayer: false,
+      isRemote: false,
+      isAi: true,
+      aiPaceFactor: 0.88 + idx * 0.02,
+    }),
+  );
+
+  const dt = 0.04;
+  const maxOffsets = new Array<number>(aiBikes.length).fill(0);
+  // Simulate 100 seconds of racing (enough to complete 1+ full 2.5km laps)
+  for (let step = 0; step < 2500; step++) {
+    const raceMs = step * dt * 1000;
+    for (let i = 0; i < aiBikes.length; i++) {
+      const b = aiBikes[i];
+      const input = computeAiInput(b, circuit, aiBikes);
+      stepBikePhysics(b, input, dt, circuit, raceMs, 3, true);
+      maxOffsets[i] = Math.max(maxOffsets[i], Math.abs(b.trackOffset));
+    }
+    resolveBikeCollisions(aiBikes);
+  }
+
+  for (let i = 0; i < aiBikes.length; i++) {
+    assert.ok(
+      aiBikes[i].lap >= 2,
+      `AI ${i} should complete at least 1 full lap on 2.5km track, got lap=${aiBikes[i].lap} totalProgress=${aiBikes[i].totalProgress}`,
+    );
+    assert.ok(
+      maxOffsets[i] < TRACK_HALF_WIDTH + CURB_WIDTH + 3.5,
+      `AI ${i} drifted too far off track (maxOffset=${maxOffsets[i].toFixed(2)}m)`,
+    );
+  }
 });
 

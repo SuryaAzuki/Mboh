@@ -11,32 +11,35 @@ export interface TrackSample {
   z: number;
   tx: number; // unit tangent x
   tz: number; // unit tangent z
-  nx: number; // unit right normal x (pointing right of travel direction)
+  nx: number; // unit right normal x
   nz: number; // unit right normal z
   curvature: number; // signed curvature (rad/m)
 }
 
-export const TRACK_HALF_WIDTH = 8.0; // 16m wide MotoGP asphalt
+export const TRACK_HALF_WIDTH = 8.5; // 17m wide MotoGP asphalt for 10-bike packs
 export const CURB_WIDTH = 1.6;
 export const GRAVEL_WIDTH = 9.0;
-export const WORLD_BOUNDARY_RADIUS = 310;
+export const WORLD_BOUNDARY_RADIUS = 640;
 
-// Control points for a flowing MotoGP Grand Prix circuit (~1180m loop)
-// Main straight runs along x = 0, from z = -120 toward z = +130 (heading = 0, +Z)
+// Long flowing MotoGP Grand Prix circuit (~2,550m loop)
+// Main straight runs along x = 0, from z = -260 toward z = +240 (heading = 0, +Z)
+// Clockwise loop around infield center (~ +180, -20)
 const CIRCUIT_CONTROL_POINTS: Vec2[] = [
-  { x: 0, z: -120 },
-  { x: 0, z: -20 },
-  { x: 0, z: 90 }, // Start/Finish straight & Turn 1 braking zone
-  { x: 24, z: 165 }, // Turn 1 fast right-hander
-  { x: 96, z: 185 }, // Turn 2 exit
-  { x: 158, z: 145 }, // Turn 3 sweeping right
-  { x: 175, z: 75 },
-  { x: 120, z: 25 }, // Turn 4 chicane entry (left)
-  { x: 145, z: -45 }, // Turn 5 chicane exit (right)
-  { x: 195, z: -115 },
-  { x: 155, z: -185 }, // Turn 6 Hairpin
-  { x: 65, z: -190 },
-  { x: -15, z: -165 }, // Final parabolic corner onto main straight
+  { x: 0, z: -240 },
+  { x: 0, z: -60 },
+  { x: 0, z: 140 },
+  { x: 18, z: 270 }, // End of main straight / Turn 1 braking zone
+  { x: 110, z: 345 }, // Turn 1 sweeping right-hander
+  { x: 245, z: 330 }, // Turn 2 fast exit
+  { x: 345, z: 235 }, // Turn 3 high-speed right
+  { x: 350, z: 105 }, // Esses entry
+  { x: 235, z: 45 }, // Turn 4 technical left
+  { x: 265, z: -65 }, // Turn 5 chicane apex
+  { x: 405, z: -125 }, // Turn 6 sweeping acceleration corner
+  { x: 425, z: -265 }, // Back straight into Turn 7 hairpin
+  { x: 325, z: -365 }, // Turn 7 Hairpin apex
+  { x: 175, z: -345 }, // Stadium S-bend
+  { x: 45, z: -325 }, // Final parabolic corner onto main straight
 ];
 
 function catmullRom(p0: number, p1: number, p2: number, p3: number, t: number): number {
@@ -55,11 +58,12 @@ export interface CircuitData {
   samples: TrackSample[];
   totalLength: number;
   bounds: { minX: number; maxX: number; minZ: number; maxZ: number };
+  centroid: Vec2;
 }
 
 let cachedCircuit: CircuitData | null = null;
 
-export function buildCircuitData(sampleCount = 480): CircuitData {
+export function buildCircuitData(sampleCount = 800): CircuitData {
   const n = CIRCUIT_CONTROL_POINTS.length;
   const rawPoints: Vec2[] = [];
 
@@ -116,6 +120,8 @@ export function buildCircuitData(sampleCount = 480): CircuitData {
   let maxX = -Infinity;
   let minZ = Infinity;
   let maxZ = -Infinity;
+  let sumX = 0;
+  let sumZ = 0;
 
   const samples: TrackSample[] = [];
   for (let i = 0; i < sampleCount; i++) {
@@ -128,8 +134,6 @@ export function buildCircuitData(sampleCount = 480): CircuitData {
     const len = Math.max(1e-6, Math.hypot(dx, dz));
     const tx = dx / len;
     const tz = dz / len;
-    // Heading = atan2(tx, tz); right vector in (x, z) when +Y is up:
-    // Forward = (tx, tz), Right = (-tz, tx)
     const nx = -tz;
     const nz = tx;
 
@@ -146,6 +150,8 @@ export function buildCircuitData(sampleCount = 480): CircuitData {
     if (curr.x > maxX) maxX = curr.x;
     if (curr.z < minZ) minZ = curr.z;
     if (curr.z > maxZ) maxZ = curr.z;
+    sumX += curr.x;
+    sumZ += curr.z;
 
     samples.push({
       s: (i / sampleCount) * totalLength,
@@ -163,12 +169,13 @@ export function buildCircuitData(sampleCount = 480): CircuitData {
     samples,
     totalLength,
     bounds: { minX, maxX, minZ, maxZ },
+    centroid: { x: sumX / sampleCount, z: sumZ / sampleCount },
   };
 }
 
 export function getCircuit(): CircuitData {
   if (!cachedCircuit) {
-    cachedCircuit = buildCircuitData(480);
+    cachedCircuit = buildCircuitData(800);
   }
   return cachedCircuit;
 }
@@ -229,9 +236,8 @@ export function projectToTrack(
   let bestDistSq = Infinity;
 
   if (hintS !== undefined) {
-    // Search local window around hintS first (~160m window)
     const centerIdx = Math.floor((((hintS % totalLength) + totalLength) % totalLength) / totalLength * n);
-    const windowRadius = 36;
+    const windowRadius = 48;
     for (let k = -windowRadius; k <= windowRadius; k++) {
       const idx = (centerIdx + k + n) % n;
       const smp = samples[idx];
@@ -245,8 +251,7 @@ export function projectToTrack(
     }
   }
 
-  // Fallback global search if hint was missing or too far (> 45m)
-  if (bestDistSq > 45 * 45) {
+  if (bestDistSq > 48 * 48) {
     bestDistSq = Infinity;
     for (let i = 0; i < n; i++) {
       const smp = samples[i];
@@ -263,7 +268,6 @@ export function projectToTrack(
   const base = samples[bestIdx];
   const dx = x - base.x;
   const dz = z - base.z;
-  // Project along tangent to refine s smoothly
   const tangentProj = dx * base.tx + dz * base.tz;
   const refinedS = ((base.s + tangentProj) % totalLength + totalLength) % totalLength;
   const refinedSample = sampleTrackAtS(circuit, refinedS);
@@ -281,8 +285,23 @@ export function projectToTrack(
   };
 }
 
-// Start line sits at s = 110m along the straight (near z = -10, facing +Z toward Turn 1)
-export const START_LINE_S = 110;
+// Point-in-polygon check against circuit centerline so scenery never spawns in the circuit infield
+export function isInsideCircuitLoop(circuit: CircuitData, x: number, z: number): boolean {
+  const pts = circuit.samples;
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const xi = pts[i].x;
+    const zi = pts[i].z;
+    const xj = pts[j].x;
+    const zj = pts[j].z;
+    const intersect = zi > z !== zj > z && x < ((xj - xi) * (z - zi)) / (zj - zi + 1e-9) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+// Start line sits at s = 180m along the long main straight (facing +Z toward Turn 1)
+export const START_LINE_S = 180;
 
 export function getLapProgressS(rawS: number, totalLength: number): number {
   return ((rawS - START_LINE_S) % totalLength + totalLength) % totalLength;
@@ -295,7 +314,7 @@ export function getGridSlotTransform(
   const row = Math.floor(slotIndex / 2);
   const col = slotIndex % 2;
   const sBack = START_LINE_S - 10 - row * 7.5;
-  const lateral = col === 0 ? -2.6 : 2.6;
+  const lateral = col === 0 ? -2.8 : 2.8;
   const smp = sampleTrackAtS(circuit, sBack);
   return {
     x: smp.x + smp.nx * lateral,
@@ -321,13 +340,11 @@ export function updateLapAndCheckpoints(
 } {
   let mask = checkpointMask;
   const sector = Math.min(3, Math.floor((newLapProgress / totalLength) * 4));
-  // Require sequential sector progression or mark sectors 0..3 when passed
   if (sector === 0) mask |= 1;
   else if (sector === 1 && (mask & 1)) mask |= 2;
   else if (sector === 2 && (mask & 2)) mask |= 4;
   else if (sector === 3 && (mask & 4)) mask |= 8;
 
-  // Crossed start/finish line forward (from final quarter > 75% to first quarter < 25%)
   const crossedForward =
     prevLapProgress > totalLength * 0.75 && newLapProgress < totalLength * 0.25;
 
@@ -342,7 +359,7 @@ export function updateLapAndCheckpoints(
     }
     return {
       lap: currentLap + 1,
-      checkpointMask: 1, // already in sector 0 of next lap
+      checkpointMask: 1,
       completedLap: true,
       finishedRace: false,
     };

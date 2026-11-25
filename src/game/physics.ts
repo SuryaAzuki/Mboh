@@ -104,52 +104,66 @@ export function computeAiInput(
     return { throttle: 0.25, brake: 0.3, steer: 0, boost: false };
   }
 
-  const lookAheadDist = 18 + bike.speed * 0.48;
+  // Lookahead scales smoothly with speed for stable straightaways & responsive hairpins
+  const lookAheadDist = 14 + bike.speed * 0.42;
   const targetSample = sampleTrackAtS(circuit, bike.trackS + lookAheadDist);
-  const cornerSample = sampleTrackAtS(circuit, bike.trackS + 34 + bike.speed * 0.55);
 
-  // Dynamic overtaking offset if another bike is directly ahead
+  // Scan upcoming curvature at near, mid, and braking-zone distances
+  const nearCurv = sampleTrackAtS(circuit, bike.trackS + 22).curvature;
+  const midCurv = sampleTrackAtS(circuit, bike.trackS + 46 + bike.speed * 0.38).curvature;
+  const farCurv = sampleTrackAtS(circuit, bike.trackS + 78 + bike.speed * 0.6).curvature;
+  const peakCurv = Math.max(Math.abs(nearCurv), Math.abs(midCurv), Math.abs(farCurv));
+
+  // Dynamic overtaking lane shift if another bike is directly ahead
   let avoidOffset = 0;
   for (const other of allBikes) {
     if (other.id === bike.id) continue;
-    const ds = other.trackS - bike.trackS;
-    if (ds > 2 && ds < 16 && Math.abs(other.trackOffset - bike.trackOffset) < 2.6) {
-      avoidOffset = other.trackOffset > 0 ? -3.0 : 3.0;
+    const ds = (other.trackS - bike.trackS + circuit.totalLength) % circuit.totalLength;
+    if (ds > 1.5 && ds < 18 && Math.abs(other.trackOffset - bike.trackOffset) < 2.8) {
+      avoidOffset = other.trackOffset >= 0 ? -3.4 : 3.4;
       break;
     }
   }
 
+  // Pull urgently back to centerline if off asphalt; otherwise blend apex line & overtake offset
+  const offTrack = Math.abs(bike.trackOffset) > TRACK_HALF_WIDTH - 1.2;
+  const apexBias = Math.abs(midCurv) > 0.004 ? Math.sign(midCurv) * 2.2 : 0;
+  const rawDesiredOffset = offTrack ? 0 : bike.aiTargetOffset * 0.65 + apexBias + avoidOffset;
   const desiredOffset = Math.max(
-    -(TRACK_HALF_WIDTH - 1.8),
-    Math.min(TRACK_HALF_WIDTH - 1.8, bike.aiTargetOffset + avoidOffset),
+    -(TRACK_HALF_WIDTH - 2.0),
+    Math.min(TRACK_HALF_WIDTH - 2.0, rawDesiredOffset),
   );
   const tx = targetSample.x + targetSample.nx * desiredOffset;
   const tz = targetSample.z + targetSample.nz * desiredOffset;
 
+  // NOTE: In physics integration, steer > 0 leans right and DECREASES heading (turns toward -X).
+  // Therefore angleErr = normalizeAngle(angleToTarget - bike.heading) requires NEGATIVE sign (-angleErr).
   const angleToTarget = Math.atan2(tx - bike.x, tz - bike.z);
   const angleErr = normalizeAngle(angleToTarget - bike.heading);
-  const steer = Math.max(-1, Math.min(1, angleErr * 2.2));
+  const steer = Math.max(-1, Math.min(1, -angleErr * 2.5));
 
-  // Cornering target speed from upcoming curvature scaled by bike class
+  // Compute safe cornering speed from upcoming curvature and heading alignment
   const spec = BIKE_CLASSES[bike.bikeClass];
-  const absCurv = Math.abs(cornerSample.curvature);
-  const cornerSpeedLimit = absCurv > 0.008 ? Math.max(26, 56 - absCurv * 1100) : spec.topSpeedMs;
-  const targetSpeed = Math.min(spec.topSpeedMs, cornerSpeedLimit) * bike.aiPaceFactor;
+  const cornerSpeedLimit =
+    peakCurv > 0.004 ? Math.max(24, 68 - peakCurv * 2600) : spec.topSpeedMs;
+  const alignmentSlowdown = Math.abs(angleErr) > 0.35 ? 0.8 : 1.0;
+  const targetSpeed = Math.min(spec.topSpeedMs, cornerSpeedLimit) * bike.aiPaceFactor * alignmentSlowdown;
 
   let throttle = 1;
   let brake = 0;
-  if (bike.speed > targetSpeed + 4) {
+  if (bike.speed > targetSpeed + 4.5) {
     throttle = 0;
-    brake = Math.min(1, (bike.speed - targetSpeed) * 0.08);
-  } else if (bike.speed > targetSpeed) {
-    throttle = 0.35;
+    brake = Math.min(1, (bike.speed - targetSpeed) * 0.09);
+  } else if (bike.speed > targetSpeed + 0.5) {
+    throttle = 0.45;
   }
 
   const boost =
-    absCurv < 0.004 &&
-    Math.abs(angleErr) < 0.12 &&
-    bike.boostFuel > 55 &&
-    bike.speed > 45;
+    peakCurv < 0.0035 &&
+    Math.abs(angleErr) < 0.1 &&
+    !offTrack &&
+    bike.boostFuel > 50 &&
+    bike.speed > 42;
 
   return { throttle, brake, steer, boost };
 }
