@@ -1,12 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AndroidApkModal } from './components/AndroidApkModal';
+import { CareerModal } from './components/CareerModal';
 import { LanLobbyModal } from './components/LanLobbyModal';
+import { QuickRaceModal } from './components/QuickRaceModal';
 import { RaceHud } from './components/RaceHud';
 import { FinishModal, PauseModal, type CareerFinishOutcome } from './components/RaceModals';
-import { TitleScreen, type MainMenuTab } from './components/TitleScreen';
+import { SettingsModal } from './components/SettingsModal';
+import { TitleScreen } from './components/TitleScreen';
 import { TouchControls } from './components/TouchControls';
 import {
   applyCareerRaceOutcome,
+  buildQualifyingClassification,
+  DEFAULT_RACE_RIDER_COUNT,
   findPlayerRankFromResults,
   getActiveCareerRound,
   loadCareerProgress,
@@ -15,20 +20,24 @@ import {
   type CareerProgress,
 } from './game/career';
 import { MotoGPScene, type RaceStartConfig } from './game/MotoGPScene';
+import { CIRCUIT_SPECS } from './game/trackMath';
 import {
   TEAM_LIVERIES,
   type BikeClassId,
   type CameraMode,
+  type CircuitId,
   type GameScreenState,
   type HudSnapshot,
   type LanRoomState,
   type RaceResultEntry,
   type RiderInput,
+  type SessionType,
   type TeamLivery,
 } from './game/types';
 import { getDefaultWsUrl, LanMultiplayerClient, type OpenRoomSummary } from './net/lanClient';
 
 const INITIAL_HUD: HudSnapshot = {
+  sessionType: 'race',
   speedKmh: 0,
   gear: 1,
   rpmRatio: 0.1,
@@ -37,14 +46,17 @@ const INITIAL_HUD: HudSnapshot = {
   lap: 1,
   totalLaps: 3,
   rank: 1,
-  totalRiders: 10,
+  totalRiders: DEFAULT_RACE_RIDER_COUNT,
   raceTimeMs: 0,
   currentLapMs: 0,
   bestLapMs: null,
   countdownStage: 3,
   surface: 'asphalt',
   wrongWay: false,
+  crashed: false,
+  crashRecoverSec: 0,
   bikeClass: 'motogp',
+  leaderboard: [],
   minimapRiders: [],
 };
 
@@ -54,10 +66,12 @@ export default function App() {
   const lanRef = useRef<LanMultiplayerClient | null>(null);
 
   const [gameState, setGameState] = useState<GameScreenState>('title');
-  const [menuTab, setMenuTab] = useState<MainMenuTab>('career');
   const [careerProgress, setCareerProgress] = useState<CareerProgress>(() => loadCareerProgress());
   const [quickClass, setQuickClass] = useState<BikeClassId>('motogp');
   const [quickLaps, setQuickLaps] = useState<number>(3);
+  const [quickRiderCount, setQuickRiderCount] = useState<number>(DEFAULT_RACE_RIDER_COUNT);
+  const [selectedCircuit, setSelectedCircuit] = useState<CircuitId>('lusail');
+  const [activeCircuitId, setActiveCircuitId] = useState<CircuitId>('lusail');
   const [selectedLivery, setSelectedLivery] = useState<TeamLivery>(TEAM_LIVERIES[0]);
   const [riderName, setRiderName] = useState('Rider 1');
   const [hud, setHud] = useState<HudSnapshot>(INITIAL_HUD);
@@ -71,10 +85,14 @@ export default function App() {
   );
   const [results, setResults] = useState<RaceResultEntry[]>([]);
   const [activeRaceIsCareer, setActiveRaceIsCareer] = useState(false);
+  const [activeSessionType, setActiveSessionType] = useState<SessionType>('race');
   const [careerOutcome, setCareerOutcome] = useState<CareerFinishOutcome | null>(null);
 
   // Modal state
+  const [quickRaceOpen, setQuickRaceOpen] = useState(false);
+  const [careerOpen, setCareerOpen] = useState(false);
   const [lanOpen, setLanOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [androidOpen, setAndroidOpen] = useState(false);
 
   // LAN state
@@ -92,72 +110,105 @@ export default function App() {
     sceneRef.current?.setGameState(gameState);
   }, [gameState]);
 
-  // Keep 3D Title showcase bike synced with selected livery & previewed class
+  // Keep 3D Title showcase bike & circuit synced with selected livery, class & circuit
   useEffect(() => {
     if (gameState !== 'title') return;
-    const previewClass = menuTab === 'career' ? careerProgress.activeClass : quickClass;
-    sceneRef.current?.updateShowcaseBike(selectedLivery, previewClass);
-    const mood = menuTab === 'career' ? getActiveCareerRound(careerProgress).skyMood : 'sunny';
-    sceneRef.current?.applySkyMood(mood);
-  }, [gameState, menuTab, careerProgress, quickClass, selectedLivery]);
+    sceneRef.current?.updateShowcaseBike(selectedLivery, quickClass, selectedCircuit);
+    sceneRef.current?.applySkyMood(CIRCUIT_SPECS[selectedCircuit].skyMood);
+  }, [gameState, quickClass, selectedLivery, selectedCircuit]);
 
   const launchSinglePlayerRace = useCallback(
     (opts: {
       mode: 'career' | 'solo';
+      sessionType?: SessionType;
       bikeClass: BikeClassId;
+      circuitId: CircuitId;
       totalLaps: number;
       aiDifficulty: number;
       skyMood: 'sunny' | 'sunset' | 'overcast';
+      riderCount?: number;
+      playerGridPos?: number;
+      orderedAiLiveryIds?: string[];
     }) => {
-      const usedIds = new Set([selectedLivery.id]);
-      const aiLiveries = TEAM_LIVERIES.filter((l) => !usedIds.has(l.id));
-      const aiNames = [
-        'M. Rossi',
-        'F. Bagnaia',
-        'M. Marquez',
-        'J. Martin',
-        'F. Quartararo',
-        'A. Espargaro',
-        'E. Bastianini',
-        'B. Binder',
-        'P. Acosta',
-      ];
+      const sessionType: SessionType = opts.sessionType ?? 'race';
+      const riderCount = Math.max(2, Math.min(TEAM_LIVERIES.length, opts.riderCount ?? DEFAULT_RACE_RIDER_COUNT));
+      const localDisplayName = selectedLivery.riderName || riderName || 'You';
+      const playerParticipant = {
+        id: 'local',
+        name: localDisplayName,
+        livery: selectedLivery,
+        bikeClass: opts.bikeClass,
+        isPlayer: true,
+        isRemote: false,
+        isAi: false,
+      };
+
+      let participants: RaceStartConfig['participants'];
+      if (sessionType === 'qualifying') {
+        participants = [playerParticipant];
+      } else {
+        const defaultAiPool = TEAM_LIVERIES.filter((l) => l.id !== selectedLivery.id);
+        const orderedAi: TeamLivery[] = [];
+        if (opts.orderedAiLiveryIds && opts.orderedAiLiveryIds.length > 0) {
+          const seen = new Set<string>([selectedLivery.id]);
+          for (const lid of opts.orderedAiLiveryIds) {
+            const found = TEAM_LIVERIES.find((l) => l.id === lid);
+            if (found && !seen.has(found.id)) {
+              seen.add(found.id);
+              orderedAi.push(found);
+            }
+          }
+          for (const fallback of defaultAiPool) {
+            if (!seen.has(fallback.id)) {
+              seen.add(fallback.id);
+              orderedAi.push(fallback);
+            }
+          }
+        } else {
+          orderedAi.push(...defaultAiPool);
+        }
+
+        const aiParticipants = orderedAi.slice(0, riderCount - 1).map((liv, i) => ({
+          id: `ai-${i + 1}`,
+          name: liv.riderName,
+          livery: liv,
+          bikeClass: opts.bikeClass,
+          aiPaceFactor: Math.max(0.95, Math.min(1.04, opts.aiDifficulty + (0.045 - (i / Math.max(1, riderCount - 2)) * 0.085))),
+          isPlayer: false,
+          isRemote: false,
+          isAi: true,
+        }));
+
+        const playerSlotIdx = Math.max(0, Math.min(aiParticipants.length, (opts.playerGridPos ?? 1) - 1));
+        participants = [
+          ...aiParticipants.slice(0, playerSlotIdx),
+          playerParticipant,
+          ...aiParticipants.slice(playerSlotIdx),
+        ];
+      }
 
       const config: RaceStartConfig = {
         mode: opts.mode,
+        sessionType,
         bikeClass: opts.bikeClass,
+        circuitId: opts.circuitId,
         totalLaps: opts.totalLaps,
         skyMood: opts.skyMood,
         localRiderId: 'local',
-        localRiderName: riderName,
+        localRiderName: localDisplayName,
         localLivery: selectedLivery,
-        participants: [
-          {
-            id: 'local',
-            name: riderName || 'You',
-            livery: selectedLivery,
-            bikeClass: opts.bikeClass,
-            isPlayer: true,
-            isRemote: false,
-            isAi: false,
-          },
-          ...aiNames.map((name, i) => ({
-            id: `ai-${i + 1}`,
-            name,
-            livery: aiLiveries[i % aiLiveries.length],
-            bikeClass: opts.bikeClass,
-            aiPaceFactor: opts.aiDifficulty + ((i % 4) - 1) * 0.025,
-            isPlayer: false,
-            isRemote: false,
-            isAi: true,
-          })),
-        ],
+        participants,
       };
 
       setIsLanRace(false);
+      setActiveCircuitId(opts.circuitId);
       setActiveRaceIsCareer(opts.mode === 'career');
+      setActiveSessionType(sessionType);
       setCareerOutcome(null);
+      setQuickRaceOpen(false);
+      setCareerOpen(false);
       setLanOpen(false);
+      setSettingsOpen(false);
       setAndroidOpen(false);
       document.body.dataset.state = 'playing';
       setGameState('playing');
@@ -166,31 +217,60 @@ export default function App() {
     [riderName, selectedLivery],
   );
 
-  const startCareerRace = useCallback(() => {
+  const startCareerQualifying = useCallback(() => {
     const round = getActiveCareerRound(careerProgress);
     launchSinglePlayerRace({
       mode: 'career',
+      sessionType: 'qualifying',
       bikeClass: careerProgress.activeClass,
-      totalLaps: round.laps,
+      circuitId: round.circuitId,
+      totalLaps: 1,
       aiDifficulty: round.aiDifficulty,
       skyMood: round.skyMood,
+      riderCount: DEFAULT_RACE_RIDER_COUNT,
     });
   }, [careerProgress, launchSinglePlayerRace]);
 
+  const startCareerRace = useCallback(
+    (progressOverride?: CareerProgress) => {
+      const prog = progressOverride ?? careerProgress;
+      const round = getActiveCareerRound(prog);
+      launchSinglePlayerRace({
+        mode: 'career',
+        sessionType: 'race',
+        bikeClass: prog.activeClass,
+        circuitId: round.circuitId,
+        totalLaps: round.laps,
+        aiDifficulty: round.aiDifficulty,
+        skyMood: round.skyMood,
+        riderCount: DEFAULT_RACE_RIDER_COUNT,
+        playerGridPos: prog.qualifyingGridPos ?? DEFAULT_RACE_RIDER_COUNT,
+        orderedAiLiveryIds: prog.qualifyingOrderIds,
+      });
+    },
+    [careerProgress, launchSinglePlayerRace],
+  );
+
   const startQuickRace = useCallback(() => {
+    const spec = CIRCUIT_SPECS[selectedCircuit];
     launchSinglePlayerRace({
       mode: 'solo',
+      sessionType: 'race',
       bikeClass: quickClass,
+      circuitId: selectedCircuit,
       totalLaps: quickLaps,
-      aiDifficulty: 0.86,
-      skyMood: 'sunny',
+      aiDifficulty: 0.98,
+      skyMood: spec.skyMood,
+      riderCount: quickRiderCount,
+      playerGridPos: Math.min(quickRiderCount, Math.ceil(quickRiderCount * 0.45)),
     });
-  }, [launchSinglePlayerRace, quickClass, quickLaps]);
+  }, [launchSinglePlayerRace, quickClass, quickLaps, quickRiderCount, selectedCircuit]);
 
   const startLanRaceFromRoom = useCallback(
     (room: LanRoomState) => {
       const myId = lanRef.current?.getClientId() || lanClientId || 'local';
       const roomClass: BikeClassId = room.bikeClass ?? 'motogp';
+      const roomCircuit: CircuitId = room.circuitId ?? 'lusail';
       const participants: RaceStartConfig['participants'] = room.players.map((p) => {
         const liv = TEAM_LIVERIES.find((l) => l.id === p.liveryId) ?? TEAM_LIVERIES[0];
         const isMe = p.id === myId;
@@ -205,16 +285,16 @@ export default function App() {
         };
       });
 
-      if (room.fillWithAi && participants.length < 10) {
+      if (room.fillWithAi && participants.length < DEFAULT_RACE_RIDER_COUNT) {
         const usedLiveries = new Set(participants.map((p) => p.livery.id));
         const avail = TEAM_LIVERIES.filter((l) => !usedLiveries.has(l.id));
-        const aiRoster = ['M. Rossi', 'F. Bagnaia', 'M. Marquez', 'J. Martin', 'F. Quartararo', 'A. Espargaro', 'E. Bastianini', 'B. Binder', 'P. Acosta'];
         let aiIdx = 0;
-        while (participants.length < 10) {
+        while (participants.length < DEFAULT_RACE_RIDER_COUNT) {
+          const liv = avail[aiIdx % avail.length] ?? TEAM_LIVERIES[aiIdx % TEAM_LIVERIES.length];
           participants.push({
             id: `ai-${aiIdx + 1}`,
-            name: aiRoster[aiIdx] ?? `GP AI #${aiIdx + 1}`,
-            livery: avail[aiIdx % avail.length] ?? TEAM_LIVERIES[aiIdx % TEAM_LIVERIES.length],
+            name: liv.riderName ?? `GP AI #${aiIdx + 1}`,
+            livery: liv,
             bikeClass: roomClass,
             isPlayer: false,
             isRemote: false,
@@ -226,8 +306,12 @@ export default function App() {
 
       const me = participants.find((p) => p.isPlayer) ?? participants[0];
       setIsLanRace(true);
+      setActiveCircuitId(roomCircuit);
       setActiveRaceIsCareer(false);
+      setActiveSessionType('race');
       setCareerOutcome(null);
+      setQuickRaceOpen(false);
+      setCareerOpen(false);
       setLanOpen(false);
       setAndroidOpen(false);
       document.body.dataset.state = 'playing';
@@ -235,8 +319,9 @@ export default function App() {
       sceneRef.current?.startRace({
         mode: 'lan',
         bikeClass: roomClass,
+        circuitId: roomCircuit,
         totalLaps: room.totalLaps,
-        skyMood: 'sunny',
+        skyMood: CIRCUIT_SPECS[roomCircuit].skyMood,
         localRiderId: me.id,
         localRiderName: me.name,
         localLivery: me.livery,
@@ -252,14 +337,18 @@ export default function App() {
     isLanRace,
     gameState,
     activeRaceIsCareer,
+    activeSessionType,
     careerProgress,
+    selectedLivery,
   });
   callbacksRef.current = {
     startLanRaceFromRoom,
     isLanRace,
     gameState,
     activeRaceIsCareer,
+    activeSessionType,
     careerProgress,
+    selectedLivery,
   };
 
   // Mount WebGL canvas once
@@ -270,6 +359,34 @@ export default function App() {
     const scene = new MotoGPScene(mount, {
       onHudUpdate: (snapshot) => setHud(snapshot),
       onRaceFinish: (res) => {
+        if (callbacksRef.current.activeRaceIsCareer && callbacksRef.current.activeSessionType === 'qualifying') {
+          const playerEntry = res.find((r) => r.isPlayer) ?? res[0];
+          const curProg = callbacksRef.current.careerProgress;
+          const round = getActiveCareerRound(curProg);
+          const quali = buildQualifyingClassification({
+            circuitId: round.circuitId,
+            bikeClass: curProg.activeClass,
+            aiDifficulty: round.aiDifficulty,
+            playerLivery: playerEntry?.livery ?? callbacksRef.current.selectedLivery,
+            playerName: playerEntry?.name ?? 'You',
+            playerLapMs: playerEntry?.finishTimeMs ?? 90000,
+            playerTopSpeedKmh: playerEntry?.topSpeedKmh ?? 250,
+            riderCount: DEFAULT_RACE_RIDER_COUNT,
+          });
+          const updated: CareerProgress = {
+            ...curProg,
+            qualifyingGridPos: quali.playerGridPos,
+            qualifyingLapMs: playerEntry?.finishTimeMs ?? null,
+            qualifyingOrderIds: quali.orderedAiLiveryIds,
+          };
+          saveCareerProgress(updated);
+          setCareerProgress(updated);
+          setResults(quali.results);
+          setCareerOutcome(null);
+          setGameState('gameover');
+          return;
+        }
+
         setResults(res);
         if (callbacksRef.current.activeRaceIsCareer) {
           const rank = findPlayerRankFromResults(res);
@@ -353,16 +470,35 @@ export default function App() {
     };
   }, []);
 
-  // Enter / Space starts from Title; Esc / P toggles Pause during play
+  // Enter / Space opens or starts Quick Race from Title; Esc closes modals or toggles Pause
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (gameState === 'title' && !lanOpen && !androidOpen) {
-        if (e.code === 'Enter' || e.code === 'Space') {
+      if (gameState === 'title') {
+        if (e.code === 'Escape') {
+          if (quickRaceOpen || careerOpen || settingsOpen || lanOpen || androidOpen) {
+            e.preventDefault();
+            setQuickRaceOpen(false);
+            setCareerOpen(false);
+            setSettingsOpen(false);
+            setLanOpen(false);
+            setAndroidOpen(false);
+          }
+          return;
+        }
+        if (quickRaceOpen && (e.code === 'Enter' || e.code === 'Space')) {
           const activeTag = document.activeElement?.tagName;
-          if (activeTag === 'INPUT' || activeTag === 'SELECT') return;
+          if (activeTag === 'INPUT' || activeTag === 'SELECT' || activeTag === 'BUTTON') return;
           e.preventDefault();
-          if (menuTab === 'career') startCareerRace();
-          else startQuickRace();
+          startQuickRace();
+          return;
+        }
+        if (!quickRaceOpen && !careerOpen && !lanOpen && !settingsOpen && !androidOpen) {
+          if (e.code === 'Enter' || e.code === 'Space') {
+            const activeTag = document.activeElement?.tagName;
+            if (activeTag === 'INPUT' || activeTag === 'SELECT' || activeTag === 'BUTTON') return;
+            e.preventDefault();
+            setQuickRaceOpen(true);
+          }
         }
       } else if (gameState === 'paused') {
         if (e.code === 'Escape' || e.code === 'KeyP') {
@@ -373,14 +509,13 @@ export default function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [gameState, lanOpen, androidOpen, menuTab, startCareerRace, startQuickRace]);
+  }, [gameState, quickRaceOpen, careerOpen, lanOpen, settingsOpen, androidOpen, startQuickRace]);
 
   const handleTouchChange = useCallback((partial: Partial<RiderInput>) => {
     sceneRef.current?.setTouchInput(partial);
   }, []);
 
-  const preferredLanClass: BikeClassId =
-    menuTab === 'career' ? careerProgress.activeClass : quickClass;
+  const preferredLanClass: BikeClassId = quickClass;
 
   return (
     <main className="relative w-full h-full overflow-hidden bg-[#0b0f17]">
@@ -393,20 +528,11 @@ export default function App() {
 
       {gameState === 'title' && (
         <TitleScreen
-          activeTab={menuTab}
-          onChangeTab={setMenuTab}
-          career={careerProgress}
-          selectedLivery={selectedLivery}
-          quickClass={quickClass}
-          quickLaps={quickLaps}
-          onSelectLivery={setSelectedLivery}
-          onSelectQuickClass={setQuickClass}
-          onSelectQuickLaps={setQuickLaps}
-          onStartCareerRace={startCareerRace}
-          onStartQuickRace={startQuickRace}
-          onResetCareer={() => setCareerProgress(resetCareerProgress())}
-          onOpenLan={() => setLanOpen(true)}
-          onOpenAndroid={() => setAndroidOpen(true)}
+          accentHex={selectedLivery.primaryHex}
+          onQuickRace={() => setQuickRaceOpen(true)}
+          onCareer={() => setCareerOpen(true)}
+          onMultiplayer={() => setLanOpen(true)}
+          onSetting={() => setSettingsOpen(true)}
         />
       )}
 
@@ -414,6 +540,7 @@ export default function App() {
         <>
           <RaceHud
             hud={hud}
+            circuitId={activeCircuitId}
             muted={muted}
             bgmEnabled={bgmEnabled}
             cameraMode={cameraMode}
@@ -431,6 +558,7 @@ export default function App() {
               setCameraMode(next);
             }}
             onToggleTouch={() => setTouchEnabled((v) => !v)}
+            onResetBike={() => sceneRef.current?.resetLocalBike()}
             onPause={() => setGameState('paused')}
           />
           {touchEnabled && <TouchControls onChange={handleTouchChange} />}
@@ -444,7 +572,11 @@ export default function App() {
             if (isLanRace && lanRoom) {
               startLanRaceFromRoom(lanRoom);
             } else if (activeRaceIsCareer) {
-              startCareerRace();
+              if (activeSessionType === 'qualifying') {
+                startCareerQualifying();
+              } else {
+                startCareerRace();
+              }
             } else {
               startQuickRace();
             }
@@ -452,6 +584,7 @@ export default function App() {
           onExitTitle={() => {
             setIsLanRace(false);
             setActiveRaceIsCareer(false);
+            setActiveSessionType('race');
             setGameState('title');
           }}
         />
@@ -459,6 +592,7 @@ export default function App() {
 
       {gameState === 'gameover' && (
         <FinishModal
+          sessionType={activeSessionType}
           results={results}
           isLan={isLanRace}
           careerOutcome={careerOutcome}
@@ -468,15 +602,24 @@ export default function App() {
               setGameState('title');
               setLanOpen(true);
             } else if (activeRaceIsCareer) {
-              startCareerRace();
+              if (activeSessionType === 'qualifying') {
+                startCareerRace(careerProgress);
+              } else {
+                startCareerQualifying();
+              }
             } else {
               startQuickRace();
             }
           }}
           onExitTitle={() => {
+            const wasQualifying = activeRaceIsCareer && activeSessionType === 'qualifying';
             setIsLanRace(false);
             setActiveRaceIsCareer(false);
+            setActiveSessionType('race');
             setGameState('title');
+            if (wasQualifying) {
+              setCareerOpen(true);
+            }
           }}
         />
       )}
@@ -507,7 +650,7 @@ export default function App() {
           }}
           onCreateRoom={() => {
             setLanError(null);
-            lanRef.current?.createRoom(riderName, selectedLivery.id, preferredLanClass);
+            lanRef.current?.createRoom(riderName, selectedLivery.id, preferredLanClass, selectedCircuit);
           }}
           onJoinRoom={(code) => {
             setLanError(null);
@@ -522,6 +665,70 @@ export default function App() {
           onStartRace={() => lanRef.current?.startRace()}
           onRefreshRooms={() => lanRef.current?.refreshRooms()}
           onClose={() => setLanOpen(false)}
+        />
+      )}
+
+      {quickRaceOpen && (
+        <QuickRaceModal
+          selectedLivery={selectedLivery}
+          selectedCircuit={selectedCircuit}
+          quickClass={quickClass}
+          quickLaps={quickLaps}
+          quickRiderCount={quickRiderCount}
+          onSelectLivery={setSelectedLivery}
+          onSelectCircuit={setSelectedCircuit}
+          onSelectClass={setQuickClass}
+          onSelectLaps={setQuickLaps}
+          onSelectRiderCount={setQuickRiderCount}
+          onStartRace={startQuickRace}
+          onClose={() => setQuickRaceOpen(false)}
+        />
+      )}
+
+      {careerOpen && (
+        <CareerModal
+          career={careerProgress}
+          selectedLivery={selectedLivery}
+          onSelectLivery={setSelectedLivery}
+          onStartQualifying={startCareerQualifying}
+          onStartNextRound={() => startCareerRace()}
+          onResetCareer={() => setCareerProgress(resetCareerProgress())}
+          onClose={() => setCareerOpen(false)}
+        />
+      )}
+
+      {settingsOpen && (
+        <SettingsModal
+          riderName={riderName}
+          selectedLivery={selectedLivery}
+          quickClass={quickClass}
+          quickLaps={quickLaps}
+          career={careerProgress}
+          muted={muted}
+          bgmEnabled={bgmEnabled}
+          touchEnabled={touchEnabled}
+          onChangeRiderName={(name) => {
+            setRiderName(name);
+            lanRef.current?.updatePlayer({ name });
+          }}
+          onSelectLivery={(liv) => {
+            setSelectedLivery(liv);
+            lanRef.current?.updatePlayer({ liveryId: liv.id });
+          }}
+          onSelectQuickClass={setQuickClass}
+          onSelectQuickLaps={setQuickLaps}
+          onToggleMute={() => {
+            const next = sceneRef.current?.getAudio().toggleMute() ?? !muted;
+            setMuted(next);
+          }}
+          onToggleBgm={() => {
+            const next = sceneRef.current?.getAudio().toggleBgm() ?? !bgmEnabled;
+            setBgmEnabled(next);
+          }}
+          onToggleTouch={() => setTouchEnabled((v) => !v)}
+          onResetCareer={() => setCareerProgress(resetCareerProgress())}
+          onOpenAndroid={() => setAndroidOpen(true)}
+          onClose={() => setSettingsOpen(false)}
         />
       )}
 

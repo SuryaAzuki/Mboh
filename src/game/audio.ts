@@ -282,17 +282,19 @@ export class MotoAudioEngine {
       }
       if (step % 4 === 2) {
         const padNotes = [293.66, 349.23, 440.0, 523.25];
-        const note = padNotes[(step / 4) % padNotes.length];
-        const pad = this.ctx.createOscillator();
-        const pGain = this.ctx.createGain();
-        pad.type = 'triangle';
-        pad.frequency.setValueAtTime(note, t);
-        pGain.gain.setValueAtTime(0.09, t);
-        pGain.gain.exponentialRampToValueAtTime(0.001, t + stepDur * 3.5);
-        pad.connect(pGain);
-        pGain.connect(this.bgmGain);
-        pad.start(t);
-        pad.stop(t + stepDur * 3.6);
+        const note = padNotes[Math.floor(step / 4) % padNotes.length];
+        if (Number.isFinite(note)) {
+          const pad = this.ctx.createOscillator();
+          const pGain = this.ctx.createGain();
+          pad.type = 'triangle';
+          pad.frequency.setValueAtTime(note, t);
+          pGain.gain.setValueAtTime(0.09, t);
+          pGain.gain.exponentialRampToValueAtTime(0.001, t + stepDur * 3.5);
+          pad.connect(pGain);
+          pGain.connect(this.bgmGain);
+          pad.start(t);
+          pad.stop(t + stepDur * 3.6);
+        }
       }
     }
   }

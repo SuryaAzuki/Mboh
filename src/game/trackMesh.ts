@@ -11,13 +11,19 @@ import {
   WORLD_BOUNDARY_RADIUS,
 } from './trackMath';
 import type { ProceduralTextures } from './textures';
+import { buildTracksideLayout } from './tracksideLayout';
+import type { SolidCollider } from './types';
 
 export interface TrackWorld {
   group: THREE.Group;
   startLights: THREE.Mesh[];
+  colliders: SolidCollider[];
   setStartLights: (litCount: number, allGreen?: boolean) => void;
+  updateCrowd: (timeSec: number, focusX: number, focusZ: number) => void;
   dispose: () => void;
 }
+
+const _crowdDummy = new THREE.Object3D();
 
 function buildRibbonGeometry(
   circuit: CircuitData,
@@ -100,12 +106,21 @@ function buildGrandstand(
   const railMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.35, metalness: 0.6 });
   disposables.push(concreteMat, seatMat, steelMat, canopyMat, railMat);
 
-  // Front safety wall facing the track
-  const frontWallGeo = new THREE.BoxGeometry(0.45, 1.4, lengthZ);
+  // Solid front concrete safety wall facing the track
+  const frontWallGeo = new THREE.BoxGeometry(0.5, 1.5, lengthZ);
   const frontWall = new THREE.Mesh(frontWallGeo, railMat);
-  frontWall.position.set(trackDirectionSign * 1.4, 0.7, 0);
+  frontWall.position.set(trackDirectionSign * 1.4, 0.75, 0);
   stand.add(frontWall);
   disposables.push(frontWallGeo);
+
+  // Solid concrete side walls enclosing grandstand structure
+  const sideWallGeo = new THREE.BoxGeometry(11.8, 5.4, 0.45);
+  const leftEndWall = new THREE.Mesh(sideWallGeo, concreteMat);
+  leftEndWall.position.set(-trackDirectionSign * 4.6, 2.7, -lengthZ * 0.5);
+  const rightEndWall = new THREE.Mesh(sideWallGeo, concreteMat);
+  rightEndWall.position.set(-trackDirectionSign * 4.6, 2.7, lengthZ * 0.5);
+  stand.add(leftEndWall, rightEndWall);
+  disposables.push(sideWallGeo);
 
   // 5 stepped seating tiers climbing AWAY from the track (-trackDirectionSign)
   const tierGeo = new THREE.BoxGeometry(2.6, 1.15, lengthZ);
@@ -129,7 +144,7 @@ function buildGrandstand(
 
   // Rear structural wall & steel columns supporting cantilevered grandstand roof
   const backX = -trackDirectionSign * 10.6;
-  const backWallGeo = new THREE.BoxGeometry(0.5, 8.8, lengthZ);
+  const backWallGeo = new THREE.BoxGeometry(0.55, 8.8, lengthZ);
   const backWall = new THREE.Mesh(backWallGeo, concreteMat);
   backWall.position.set(backX, 4.4, 0);
   stand.add(backWall);
@@ -160,7 +175,7 @@ export function createTrackWorld(circuit: CircuitData, textures: ProceduralTextu
   const disposables: Array<{ dispose: () => void }> = [];
 
   // 1. Sunlit countryside grass terrain
-  const groundGeo = new THREE.PlaneGeometry(2600, 2600);
+  const groundGeo = new THREE.PlaneGeometry(3400, 3400);
   groundGeo.rotateX(-Math.PI / 2);
   const groundMat = new THREE.MeshStandardMaterial({
     map: textures.grassMap,
@@ -241,7 +256,7 @@ export function createTrackWorld(circuit: CircuitData, textures: ProceduralTextu
   group.add(finishLine);
   disposables.push(finishLineGeo, finishLineMat);
 
-  // Starting grid white U-brackets for 10 grid slots
+  // Starting grid white U-brackets for 22 3-wide MotoGP grid slots
   const gridLineMat = new THREE.MeshBasicMaterial({ color: 0xf8fafc });
   const gridFrontGeo = new THREE.PlaneGeometry(1.7, 0.16);
   gridFrontGeo.rotateX(-Math.PI / 2);
@@ -249,11 +264,11 @@ export function createTrackWorld(circuit: CircuitData, textures: ProceduralTextu
   gridSideGeo.rotateX(-Math.PI / 2);
   disposables.push(gridLineMat, gridFrontGeo, gridSideGeo);
 
-  for (let slot = 0; slot < 10; slot++) {
-    const row = Math.floor(slot / 2);
-    const col = slot % 2;
-    const sBack = START_LINE_S - 10 - row * 7.5 + 1.0;
-    const lat = col === 0 ? -2.8 : 2.8;
+  for (let slot = 0; slot < 22; slot++) {
+    const row = Math.floor(slot / 3);
+    const col = slot % 3;
+    const sBack = START_LINE_S - 10 - row * 6.5 - col * 1.1 + 1.0;
+    const lat = (col - 1) * 3.8;
     const smp = sampleTrackAtS(circuit, sBack);
     const box = new THREE.Group();
     box.position.set(smp.x + smp.nx * lat, 0.035, smp.z + smp.nz * lat);
@@ -318,7 +333,7 @@ export function createTrackWorld(circuit: CircuitData, textures: ProceduralTextu
   group.add(gantry);
   disposables.push(pillarGeo, bridgeGeo, lightHousingGeo, podGeo, steelMat, bannerMat, lightHousingMat);
 
-  // 7. Pit Lane Complex (Pit Apron + Pit Wall + Garage Bays + Race Control Tower)
+  // 7. Pit Lane Complex (Pit Apron + Pit Wall + Garage Bays + Race Control Tower + VIP Roof Fence)
   const pitSample = sampleTrackAtS(circuit, START_LINE_S - 18);
   const pitHeading = Math.atan2(pitSample.tx, pitSample.tz);
   const pitGroup = new THREE.Group();
@@ -328,14 +343,14 @@ export function createTrackWorld(circuit: CircuitData, textures: ProceduralTextu
   const pitApronGeo = new THREE.PlaneGeometry(14, 92);
   pitApronGeo.rotateX(-Math.PI / 2);
   const pitApron = new THREE.Mesh(pitApronGeo, asphaltMat);
-  pitApron.position.set(6, 0.015, 0);
+  pitApron.position.set(-2.5, 0.015, 0);
   pitGroup.add(pitApron);
 
-  // Pit lane concrete divider wall
-  const pitWallBarrierGeo = new THREE.BoxGeometry(0.55, 1.15, 86);
+  // Pit lane concrete divider wall separating track and pit apron
+  const pitWallBarrierGeo = new THREE.BoxGeometry(0.7, 1.2, 62);
   const pitWallBarrierMat = new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.65 });
   const pitWallBarrier = new THREE.Mesh(pitWallBarrierGeo, pitWallBarrierMat);
-  pitWallBarrier.position.set(12.2, 0.58, 0);
+  pitWallBarrier.position.set(-9.5, 0.6, 0);
   pitGroup.add(pitWallBarrier);
 
   const pitBuildingGeo = new THREE.BoxGeometry(10, 5.4, 78);
@@ -348,22 +363,22 @@ export function createTrackWorld(circuit: CircuitData, textures: ProceduralTextu
   const pitRoofGeo = new THREE.BoxGeometry(12.2, 0.65, 80);
   const pitRoofMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.4, metalness: 0.7 });
   const pitBuilding = new THREE.Mesh(pitBuildingGeo, pitBuildingMat);
-  pitBuilding.position.set(-2.5, 2.7, 0);
+  pitBuilding.position.set(3.5, 2.7, 0);
   pitBuilding.castShadow = true;
   pitBuilding.receiveShadow = true;
   const pitRoof = new THREE.Mesh(pitRoofGeo, pitRoofMat);
-  pitRoof.position.set(-2.0, 5.7, 0);
+  pitRoof.position.set(3.0, 5.7, 0);
 
   // Race Control Timing Tower behind pit complex
   const towerGeo = new THREE.BoxGeometry(5.5, 14.5, 5.5);
   const towerMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.35, metalness: 0.5 });
   const tower = new THREE.Mesh(towerGeo, towerMat);
-  tower.position.set(-4.5, 7.25, 28);
+  tower.position.set(6.5, 7.25, 28);
   tower.castShadow = true;
   const towerGlassGeo = new THREE.BoxGeometry(5.8, 2.4, 5.8);
   const towerGlassMat = new THREE.MeshStandardMaterial({ color: 0x38bdf8, roughness: 0.15, metalness: 0.7 });
   const towerGlass = new THREE.Mesh(towerGlassGeo, towerGlassMat);
-  towerGlass.position.set(-4.5, 12.6, 28);
+  towerGlass.position.set(6.5, 12.6, 28);
 
   pitGroup.add(pitBuilding, pitRoof, tower, towerGlass);
   group.add(pitGroup);
@@ -381,39 +396,214 @@ export function createTrackWorld(circuit: CircuitData, textures: ProceduralTextu
     towerGlassMat,
   );
 
-  // 8. Main Grandstand ("Tribun") — placed on +pitSample.nx (outside) side facing the track
-  const mainStandX = pitSample.x + pitSample.nx * 25.5;
-  const mainStandZ = pitSample.z + pitSample.nz * 25.5;
-  const mainStand = buildGrandstand(80, 1, 0xdc2626, 0x0f172a, disposables);
-  mainStand.position.set(mainStandX, 0, mainStandZ);
-  mainStand.rotation.y = pitHeading;
-  group.add(mainStand);
+  const layout = buildTracksideLayout(circuit);
 
-  // Locate Turn 1 braking entry dynamically after main straight
-  let t1EntryS = START_LINE_S + 260;
-  for (let probe = START_LINE_S + 100; probe < circuit.totalLength; probe += 8) {
-    if (Math.abs(sampleTrackAtS(circuit, probe).curvature) > 0.005) {
-      t1EntryS = probe;
-      break;
-    }
+  // 7b. Paddock Hospitality Pavilion Building behind pit lane
+  const pavGrp = new THREE.Group();
+  pavGrp.position.set(layout.pavilion.x, 0, layout.pavilion.z);
+  pavGrp.rotation.y = layout.pavilion.heading;
+  const pavBodyGeo = new THREE.BoxGeometry(12.2, 6.2, 36);
+  const pavBodyMat = new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.65 });
+  const pavRoofGeo = new THREE.BoxGeometry(13.2, 0.7, 37.5);
+  const pavRoofMat = new THREE.MeshStandardMaterial({ color: 0xdc2626, roughness: 0.45 });
+  const pavBody = new THREE.Mesh(pavBodyGeo, pavBodyMat);
+  pavBody.position.y = 3.1;
+  pavBody.castShadow = true;
+  pavBody.receiveShadow = true;
+  const pavRoof = new THREE.Mesh(pavRoofGeo, pavRoofMat);
+  pavRoof.position.y = 6.5;
+  pavGrp.add(pavBody, pavRoof);
+  group.add(pavGrp);
+  disposables.push(pavBodyGeo, pavBodyMat, pavRoofGeo, pavRoofMat);
+
+  // 8. 4 Realistic Tiered Grandstands ("Tribun") around iconic circuit corners & straights
+  for (const gs of layout.grandstands) {
+    const stand = buildGrandstand(gs.lengthZ, gs.sideSign, gs.seatColorHex, gs.canopyColorHex, disposables);
+    stand.position.set(gs.x, 0, gs.z);
+    stand.rotation.y = gs.heading;
+    group.add(stand);
   }
+  const t1EntryS = layout.t1EntryS;
+  const mainStandPos = layout.grandstands[0];
 
-  // Second Corner Grandstand overlooking Turn 1 on the outside of the loop
-  const t1Sample = sampleTrackAtS(circuit, t1EntryS + 48);
-  const t1OutsidePos = { x: t1Sample.x + t1Sample.nx * 26.5, z: t1Sample.z + t1Sample.nz * 26.5 };
-  const t1SideSign: 1 | -1 = isInsideCircuitLoop(circuit, t1OutsidePos.x, t1OutsidePos.z) ? -1 : 1;
-  const t1Stand = buildGrandstand(52, t1SideSign, 0x2563eb, 0x1e293b, disposables);
-  t1Stand.position.set(
-    t1Sample.x + t1Sample.nx * 26.5 * t1SideSign,
-    0,
-    t1Sample.z + t1Sample.nz * 26.5 * t1SideSign,
-  );
-  t1Stand.rotation.y = Math.atan2(t1Sample.tx, t1Sample.tz);
-  group.add(t1Stand);
+  // 8b. Upgraded Animated 3D Spectators (6-part InstancedMesh: Trousers + Jersey + Head + Team Cap + Left/Right Arms) + Waving Flags
+  const specCount = layout.spectators.length;
+  const legsGeo = new THREE.BoxGeometry(0.3, 0.34, 0.22);
+  legsGeo.translate(0, 0.17, 0);
+  const legsMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.85 });
 
-  // 9. Continuous Steel Armco Guardrails + Trackside Sponsor Boards
+  const torsoGeo = new THREE.CapsuleGeometry(0.18, 0.32, 4, 6);
+  torsoGeo.translate(0, 0.48, 0);
+  const torsoMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.72 });
+
+  const headGeo = new THREE.SphereGeometry(0.14, 8, 6);
+  const headMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.65 });
+
+  const capGeo = new THREE.CylinderGeometry(0.145, 0.15, 0.1, 8);
+  const capMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6 });
+
+  const armGeo = new THREE.BoxGeometry(0.09, 0.38, 0.09);
+  armGeo.translate(0, -0.16, 0);
+  const armMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.72 });
+
+  const crowdLegs = new THREE.InstancedMesh(legsGeo, legsMat, specCount);
+  const crowdTorsos = new THREE.InstancedMesh(torsoGeo, torsoMat, specCount);
+  const crowdHeads = new THREE.InstancedMesh(headGeo, headMat, specCount);
+  const crowdCaps = new THREE.InstancedMesh(capGeo, capMat, specCount);
+  const crowdLeftArms = new THREE.InstancedMesh(armGeo, armMat, specCount);
+  const crowdRightArms = new THREE.InstancedMesh(armGeo, armMat, specCount);
+
+  crowdLegs.frustumCulled = false;
+  crowdTorsos.frustumCulled = false;
+  crowdHeads.frustumCulled = false;
+  crowdCaps.frustumCulled = false;
+  crowdLeftArms.frustumCulled = false;
+  crowdRightArms.frustumCulled = false;
+
+  const spColor = new THREE.Color();
+  for (let i = 0; i < specCount; i++) {
+    const sp = layout.spectators[i];
+    crowdLegs.setColorAt(i, spColor.setHex(sp.pantsHex));
+    crowdTorsos.setColorAt(i, spColor.setHex(sp.shirtHex));
+    crowdHeads.setColorAt(i, spColor.setHex(sp.skinHex));
+    crowdCaps.setColorAt(i, spColor.setHex(sp.capHex));
+    crowdLeftArms.setColorAt(i, spColor.setHex(sp.shirtHex));
+    crowdRightArms.setColorAt(i, spColor.setHex(sp.shirtHex));
+  }
+  if (crowdLegs.instanceColor) crowdLegs.instanceColor.needsUpdate = true;
+  if (crowdTorsos.instanceColor) crowdTorsos.instanceColor.needsUpdate = true;
+  if (crowdHeads.instanceColor) crowdHeads.instanceColor.needsUpdate = true;
+  if (crowdCaps.instanceColor) crowdCaps.instanceColor.needsUpdate = true;
+  if (crowdLeftArms.instanceColor) crowdLeftArms.instanceColor.needsUpdate = true;
+  if (crowdRightArms.instanceColor) crowdRightArms.instanceColor.needsUpdate = true;
+
+  group.add(crowdLegs, crowdTorsos, crowdHeads, crowdCaps, crowdLeftArms, crowdRightArms);
+  disposables.push(legsGeo, legsMat, torsoGeo, torsoMat, headGeo, headMat, capGeo, capMat, armGeo, armMat);
+
+  // Animated Supporter Flags waving in the stands & fan barriers
+  const flagCount = layout.flags.length;
+  const flagClothGeo = new THREE.BoxGeometry(0.05, 0.68, 1.05);
+  flagClothGeo.translate(0, 0.72, 0.52);
+  const flagClothMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.55 });
+  const flagPoleGeo = new THREE.CylinderGeometry(0.025, 0.03, 1.4, 5);
+  flagPoleGeo.translate(0, 0.45, 0);
+  const flagPoleMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, metalness: 0.6, roughness: 0.4 });
+
+  const crowdFlags = new THREE.InstancedMesh(flagClothGeo, flagClothMat, Math.max(1, flagCount));
+  const crowdFlagPoles = new THREE.InstancedMesh(flagPoleGeo, flagPoleMat, Math.max(1, flagCount));
+  crowdFlags.frustumCulled = false;
+  crowdFlagPoles.frustumCulled = false;
+  crowdFlags.count = flagCount;
+  crowdFlagPoles.count = flagCount;
+
+  for (let i = 0; i < flagCount; i++) {
+    const fl = layout.flags[i];
+    crowdFlags.setColorAt(i, spColor.setHex(fl.colorHex));
+    _crowdDummy.position.set(fl.x, fl.y, fl.z);
+    _crowdDummy.rotation.set(0, fl.yaw, 0);
+    _crowdDummy.scale.setScalar(fl.scale);
+    _crowdDummy.updateMatrix();
+    crowdFlagPoles.setMatrixAt(i, _crowdDummy.matrix);
+  }
+  if (crowdFlags.instanceColor) crowdFlags.instanceColor.needsUpdate = true;
+  crowdFlagPoles.instanceMatrix.needsUpdate = true;
+  group.add(crowdFlags, crowdFlagPoles);
+  disposables.push(flagClothGeo, flagClothMat, flagPoleGeo, flagPoleMat);
+
+  const updateCrowd = (timeSec: number, focusX: number, focusZ: number) => {
+    for (let i = 0; i < specCount; i++) {
+      const sp = layout.spectators[i];
+      const dx = sp.x - focusX;
+      const dz = sp.z - focusZ;
+      const distSq = dx * dx + dz * dz;
+      const nearBoost = distSq < 8100 ? 1 + (1 - Math.sqrt(distSq) / 90) * 1.55 : 1.0;
+
+      const wave = Math.sin(timeSec * sp.speed * nearBoost + sp.phase);
+      const jump = Math.max(0, wave) * sp.jumpAmp * nearBoost;
+      const lean = Math.cos(timeSec * sp.speed * 0.65 + sp.phase) * 0.09;
+      const baseY = sp.y + jump;
+      const sc = sp.scale;
+
+      // Trousers / lower silhouette
+      _crowdDummy.position.set(sp.x, baseY, sp.z);
+      _crowdDummy.rotation.set(0, sp.yaw, 0);
+      _crowdDummy.scale.set(sc, sp.seated ? sc * 0.72 : sc, sc);
+      _crowdDummy.updateMatrix();
+      crowdLegs.setMatrixAt(i, _crowdDummy.matrix);
+
+      // Torso
+      _crowdDummy.position.set(sp.x, baseY, sp.z);
+      _crowdDummy.rotation.set(lean, sp.yaw, 0);
+      _crowdDummy.scale.setScalar(sc);
+      _crowdDummy.updateMatrix();
+      crowdTorsos.setMatrixAt(i, _crowdDummy.matrix);
+
+      // Head
+      _crowdDummy.position.set(sp.x, baseY + 0.84 * sc, sp.z);
+      _crowdDummy.rotation.set(lean * 1.2, sp.yaw + wave * 0.16, 0);
+      _crowdDummy.scale.setScalar(sc);
+      _crowdDummy.updateMatrix();
+      crowdHeads.setMatrixAt(i, _crowdDummy.matrix);
+
+      // Racing Cap
+      if (sp.hasCap) {
+        _crowdDummy.position.set(sp.x, baseY + 0.94 * sc, sp.z);
+        _crowdDummy.rotation.set(lean * 1.2, sp.yaw + wave * 0.16, 0);
+        _crowdDummy.scale.setScalar(sc);
+      } else {
+        _crowdDummy.position.set(0, -80, 0);
+        _crowdDummy.scale.setScalar(0.001);
+      }
+      _crowdDummy.updateMatrix();
+      crowdCaps.setMatrixAt(i, _crowdDummy.matrix);
+
+      // Shoulder offsets in world space
+      const cosY = Math.cos(sp.yaw);
+      const sinY = Math.sin(sp.yaw);
+      const shoulderY = baseY + 0.66 * sc;
+      const shoulderOffset = 0.22 * sc;
+
+      // Left arm raised & cheering
+      const lCheer = 1.95 + wave * sp.armAmp * nearBoost;
+      _crowdDummy.position.set(sp.x - cosY * shoulderOffset, shoulderY, sp.z + sinY * shoulderOffset);
+      _crowdDummy.rotation.set(0, sp.yaw, lCheer);
+      _crowdDummy.scale.setScalar(sc);
+      _crowdDummy.updateMatrix();
+      crowdLeftArms.setMatrixAt(i, _crowdDummy.matrix);
+
+      // Right arm raised & cheering out of phase
+      const rCheer = -1.95 - Math.sin(timeSec * sp.speed * nearBoost + sp.phase + 0.9) * sp.armAmp * nearBoost;
+      _crowdDummy.position.set(sp.x + cosY * shoulderOffset, shoulderY, sp.z - sinY * shoulderOffset);
+      _crowdDummy.rotation.set(0, sp.yaw, rCheer);
+      _crowdDummy.scale.setScalar(sc);
+      _crowdDummy.updateMatrix();
+      crowdRightArms.setMatrixAt(i, _crowdDummy.matrix);
+    }
+
+    for (let i = 0; i < flagCount; i++) {
+      const fl = layout.flags[i];
+      const sway = Math.sin(timeSec * 5.2 + fl.phase) * 0.34;
+      const tilt = Math.cos(timeSec * 3.1 + fl.phase) * 0.16;
+      _crowdDummy.position.set(fl.x, fl.y, fl.z);
+      _crowdDummy.rotation.set(tilt, fl.yaw + sway, sway * 0.45);
+      _crowdDummy.scale.setScalar(fl.scale);
+      _crowdDummy.updateMatrix();
+      crowdFlags.setMatrixAt(i, _crowdDummy.matrix);
+    }
+
+    crowdLegs.instanceMatrix.needsUpdate = true;
+    crowdTorsos.instanceMatrix.needsUpdate = true;
+    crowdHeads.instanceMatrix.needsUpdate = true;
+    crowdCaps.instanceMatrix.needsUpdate = true;
+    crowdLeftArms.instanceMatrix.needsUpdate = true;
+    crowdRightArms.instanceMatrix.needsUpdate = true;
+    if (flagCount > 0) crowdFlags.instanceMatrix.needsUpdate = true;
+  };
+  updateCrowd(0, startSample.x, startSample.z);
+
+  // 9. Continuous Steel Armco Guardrails (with Pit Entry Opening along -nx pit straight)
   const railDist = TRACK_HALF_WIDTH + CURB_WIDTH + GRAVEL_WIDTH + 0.6;
-  const railCount = 340;
+  const railCount = 460;
   const segLen = circuit.totalLength / railCount + 0.4;
   const beamGeo = new THREE.BoxGeometry(0.18, 0.56, segLen);
   const beamMat = new THREE.MeshStandardMaterial({ color: 0xdbeafe, roughness: 0.35, metalness: 0.78 });
@@ -442,15 +632,25 @@ export function createTrackWorld(circuit: CircuitData, textures: ProceduralTextu
     dummy.updateMatrix();
     railPosts.setMatrixAt(i * 2, dummy.matrix);
 
-    // Inner rail
-    dummy.position.set(smp.x - smp.nx * railDist, 0.72, smp.z - smp.nz * railDist);
-    dummy.updateMatrix();
-    railBeams.setMatrixAt(i * 2 + 1, dummy.matrix);
-    railBeams.setColorAt(i * 2 + 1, cColor.setHex(i % 6 === 0 ? 0x2563eb : 0xe2e8f0));
+    // Inner rail (open along Pit Lane complex so pit wall separates pit lane cleanly)
+    const inPitOpening = s > START_LINE_S - 64 && s < START_LINE_S + 28;
+    if (inPitOpening) {
+      dummy.position.set(0, -50, 0);
+      dummy.scale.setScalar(0.001);
+      dummy.updateMatrix();
+      railBeams.setMatrixAt(i * 2 + 1, dummy.matrix);
+      railPosts.setMatrixAt(i * 2 + 1, dummy.matrix);
+    } else {
+      dummy.position.set(smp.x - smp.nx * railDist, 0.72, smp.z - smp.nz * railDist);
+      dummy.scale.set(1, 1, 1);
+      dummy.updateMatrix();
+      railBeams.setMatrixAt(i * 2 + 1, dummy.matrix);
+      railBeams.setColorAt(i * 2 + 1, cColor.setHex(i % 6 === 0 ? 0x2563eb : 0xe2e8f0));
 
-    dummy.position.y = 0.55;
-    dummy.updateMatrix();
-    railPosts.setMatrixAt(i * 2 + 1, dummy.matrix);
+      dummy.position.y = 0.55;
+      dummy.updateMatrix();
+      railPosts.setMatrixAt(i * 2 + 1, dummy.matrix);
+    }
   }
   railBeams.instanceMatrix.needsUpdate = true;
   if (railBeams.instanceColor) railBeams.instanceColor.needsUpdate = true;
@@ -464,7 +664,7 @@ export function createTrackWorld(circuit: CircuitData, textures: ProceduralTextu
   const tireStackGeo = new THREE.CylinderGeometry(0.55, 0.55, 1.15, 12);
   const tireStackMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.78 });
   const tireZones: number[] = [];
-  for (let s = 320; s < circuit.totalLength - 80; s += 160) {
+  for (let s = 340; s < circuit.totalLength - 80; s += 160) {
     let bestS = s;
     let bestCurv = 0;
     for (let p = s; p < s + 150; p += 10) {
@@ -474,7 +674,7 @@ export function createTrackWorld(circuit: CircuitData, textures: ProceduralTextu
         bestS = p;
       }
     }
-    if (bestCurv > 0.0055) tireZones.push(bestS);
+    if (bestCurv > 0.0045) tireZones.push(bestS);
   }
   if (tireZones.length > 0) {
     const tireStacks = new THREE.InstancedMesh(tireStackGeo, tireStackMat, tireZones.length * 4);
@@ -525,16 +725,71 @@ export function createTrackWorld(circuit: CircuitData, textures: ProceduralTextu
     group.add(holder);
   }
 
-  // Trackside Sponsor Banners along the main straight
-  const adGeo = new THREE.BoxGeometry(0.3, 1.35, 11);
-  const adMat = new THREE.MeshStandardMaterial({ map: textures.sponsorBoardMap, roughness: 0.45 });
-  disposables.push(adGeo, adMat);
-  for (const sAd of [240, 310, 380]) {
-    const smp = sampleTrackAtS(circuit, sAd);
-    const ad = new THREE.Mesh(adGeo, adMat);
-    ad.position.set(smp.x + smp.nx * (TRACK_HALF_WIDTH + 3.6), 0.72, smp.z + smp.nz * (TRACK_HALF_WIDTH + 3.6));
-    ad.rotation.y = Math.atan2(smp.tx, smp.tz);
-    group.add(ad);
+  // Trackside Advertising Billboards (34 multi-part steel-framed sponsor signs around the circuit)
+  const billboardFrameGeo = new THREE.BoxGeometry(0.28, 2.35, 11.6);
+  const billboardFrameMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.4, metalness: 0.65 });
+  const billboardPanelGeo = new THREE.PlaneGeometry(11.3, 2.1);
+  const billboardLegGeo = new THREE.BoxGeometry(0.22, 1.35, 0.22);
+  const billboardMats = textures.billboardMaps.map(
+    (map) => new THREE.MeshStandardMaterial({ color: 0xffffff, map, roughness: 0.42, metalness: 0.05 }),
+  );
+  disposables.push(billboardFrameGeo, billboardFrameMat, billboardPanelGeo, billboardLegGeo, ...billboardMats);
+
+  for (const bb of layout.billboards) {
+    const holder = new THREE.Group();
+    holder.position.set(bb.x, 0, bb.z);
+    holder.rotation.y = bb.yaw;
+
+    const frame = new THREE.Mesh(billboardFrameGeo, billboardFrameMat);
+    frame.position.y = 1.65;
+    frame.castShadow = true;
+
+    const panelMat = billboardMats[bb.brandIndex % billboardMats.length];
+    const frontFace = new THREE.Mesh(billboardPanelGeo, panelMat);
+    frontFace.position.set(0.16, 1.65, 0);
+    frontFace.rotation.y = Math.PI / 2;
+
+    const backFace = new THREE.Mesh(billboardPanelGeo, panelMat);
+    backFace.position.set(-0.16, 1.65, 0);
+    backFace.rotation.y = -Math.PI / 2;
+
+    const legA = new THREE.Mesh(billboardLegGeo, postMat);
+    legA.position.set(0, 0.65, -4.2);
+    const legB = new THREE.Mesh(billboardLegGeo, postMat);
+    legB.position.set(0, 0.65, 4.2);
+
+    holder.add(frame, frontFace, backFace, legA, legB);
+    group.add(holder);
+  }
+
+  // Overhead Sponsor Bridges across Back Straight & Final Sector
+  const spanPillarGeo = new THREE.BoxGeometry(0.85, 8.8, 0.95);
+  const spanBridgeGeo = new THREE.BoxGeometry(TRACK_HALF_WIDTH * 2 + 6.0, 2.0, 1.1);
+  const spanPanelGeo = new THREE.PlaneGeometry(TRACK_HALF_WIDTH * 2 + 4.8, 1.85);
+  disposables.push(spanPillarGeo, spanBridgeGeo, spanPanelGeo);
+
+  for (const br of layout.bridges) {
+    const brGrp = new THREE.Group();
+    brGrp.position.set(br.x, 0, br.z);
+    brGrp.rotation.y = br.heading;
+
+    const lp = new THREE.Mesh(spanPillarGeo, steelMat);
+    lp.position.set(-(TRACK_HALF_WIDTH + 2.6), 4.4, 0);
+    const rp = new THREE.Mesh(spanPillarGeo, steelMat);
+    rp.position.set(TRACK_HALF_WIDTH + 2.6, 4.4, 0);
+
+    const beam = new THREE.Mesh(spanBridgeGeo, billboardFrameMat);
+    beam.position.set(0, 8.2, 0);
+
+    const pMat = billboardMats[br.brandIndex % billboardMats.length];
+    const frontSign = new THREE.Mesh(spanPanelGeo, pMat);
+    frontSign.position.set(0, 8.2, -0.58);
+    frontSign.rotation.y = Math.PI;
+    const backSign = new THREE.Mesh(spanPanelGeo, pMat);
+    backSign.position.set(0, 8.2, 0.58);
+
+    brGrp.add(lp, rp, beam, frontSign, backSign);
+    group.add(brGrp);
   }
 
   // 12. Stadium Floodlight Towers outside circuit perimeter
@@ -543,8 +798,8 @@ export function createTrackWorld(circuit: CircuitData, textures: ProceduralTextu
   const floodHeadMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, emissive: 0xfef3c7, emissiveIntensity: 0.75 });
   disposables.push(floodPoleGeo, floodHeadGeo, floodHeadMat);
 
-  for (let i = 0; i < 8; i++) {
-    const sTower = (i / 8) * circuit.totalLength + 90;
+  for (let i = 0; i < 10; i++) {
+    const sTower = (i / 10) * circuit.totalLength + 90;
     const smp = sampleTrackAtS(circuit, sTower);
     const candX = smp.x + smp.nx * 36;
     const candZ = smp.z + smp.nz * 36;
@@ -563,7 +818,7 @@ export function createTrackWorld(circuit: CircuitData, textures: ProceduralTextu
   }
 
   // 13. Instanced Pine Tree Groves — STRICTLY outside the circuit loop and clear of asphalt/gravel/grandstands
-  const treeCount = 260;
+  const treeCount = 300;
   const trunkGeo = new THREE.CylinderGeometry(0.25, 0.38, 2.4, 7);
   trunkGeo.translate(0, 1.2, 0);
   const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5c4033, roughness: 0.9 });
@@ -581,18 +836,17 @@ export function createTrackWorld(circuit: CircuitData, textures: ProceduralTextu
     return (seed - 1) / 2147483646;
   };
 
-  const minTrackClearance = TRACK_HALF_WIDTH + CURB_WIDTH + GRAVEL_WIDTH + 18;
+  const minTrackClearance = TRACK_HALF_WIDTH + CURB_WIDTH + GRAVEL_WIDTH + 20;
   let placedTrees = 0;
-  for (let attempt = 0; attempt < 4500 && placedTrees < treeCount; attempt++) {
+  for (let attempt = 0; attempt < 5500 && placedTrees < treeCount; attempt++) {
     const angle = rand() * Math.PI * 2;
-    const radius = 160 + rand() * (WORLD_BOUNDARY_RADIUS + 60);
+    const radius = 280 + rand() * (WORLD_BOUNDARY_RADIUS - 120);
     const tx = circuit.centroid.x + Math.cos(angle) * radius;
     const tz = circuit.centroid.z + Math.sin(angle) * radius;
 
-    // Never spawn inside the circuit loop center or anywhere near the track/pit/stands
     if (isInsideCircuitLoop(circuit, tx, tz)) continue;
     if (projectToTrack(circuit, tx, tz).absOffset < minTrackClearance) continue;
-    if (Math.hypot(tx - mainStandX, tz - mainStandZ) < 60) continue;
+    if (Math.hypot(tx - mainStandPos.x, tz - mainStandPos.z) < 70) continue;
 
     const scale = 0.9 + rand() * 0.55;
     dummy.position.set(tx, 0, tz);
@@ -615,19 +869,19 @@ export function createTrackWorld(circuit: CircuitData, textures: ProceduralTextu
   disposables.push(trunkGeo, trunkMat, crownGeo, crownMat);
 
   // Rolling distant hills ring well outside track bounds
-  const hillCount = 30;
-  const hillGeo = new THREE.ConeGeometry(78, 46, 10);
-  hillGeo.translate(0, 16, 0);
+  const hillCount = 34;
+  const hillGeo = new THREE.ConeGeometry(92, 54, 10);
+  hillGeo.translate(0, 18, 0);
   const hillMat = new THREE.MeshStandardMaterial({ color: 0x3a5f3b, roughness: 0.95, metalness: 0 });
   const hills = new THREE.InstancedMesh(hillGeo, hillMat, hillCount);
   let placedHills = 0;
   for (let i = 0; i < hillCount; i++) {
     const ang = (i / hillCount) * Math.PI * 2;
-    const dist = WORLD_BOUNDARY_RADIUS + 90 + (i % 3) * 45;
+    const dist = WORLD_BOUNDARY_RADIUS + 40 + (i % 3) * 65;
     const hx = circuit.centroid.x + Math.cos(ang) * dist;
     const hz = circuit.centroid.z + Math.sin(ang) * dist;
     if (isInsideCircuitLoop(circuit, hx, hz)) continue;
-    if (projectToTrack(circuit, hx, hz).absOffset < 95) continue;
+    if (projectToTrack(circuit, hx, hz).absOffset < 110) continue;
     dummy.position.set(hx, -2, hz);
     dummy.rotation.set(0, ang, 0);
     dummy.scale.set(1.3 + (i % 4) * 0.25, 0.75 + (i % 3) * 0.4, 1.35);
@@ -663,7 +917,9 @@ export function createTrackWorld(circuit: CircuitData, textures: ProceduralTextu
   return {
     group,
     startLights,
+    colliders: layout.colliders,
     setStartLights,
+    updateCrowd,
     dispose: () => {
       disposables.forEach((d) => d.dispose());
     },

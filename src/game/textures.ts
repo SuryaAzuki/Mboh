@@ -14,6 +14,7 @@ export interface ProceduralTextures {
   brakeBoard150Map: THREE.CanvasTexture;
   brakeBoard100Map: THREE.CanvasTexture;
   brakeBoard50Map: THREE.CanvasTexture;
+  billboardMaps: THREE.CanvasTexture[];
   dispose: () => void;
 }
 
@@ -251,6 +252,14 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   const brakeBoard100Map = makeTextBoardTexture('#f8fafc', '#0f172a', '#dc2626', '100', 'M', 128, 128, aniso);
   const brakeBoard50Map = makeTextBoardTexture('#f8fafc', '#0f172a', '#dc2626', '50', 'M', 128, 128, aniso);
 
+  const billboardMaps: THREE.CanvasTexture[] = [
+    makeTextBoardTexture('#0f172a', '#f8fafc', '#dc2626', 'APEX GP', 'WORLD CHAMPIONSHIP', 512, 128, aniso),
+    makeTextBoardTexture('#18181b', '#facc15', '#ef4444', 'VORTEX TIRES', 'ULTRA COMPOUND GRIP', 512, 128, aniso),
+    makeTextBoardTexture('#0c192c', '#f8fafc', '#06b6d4', 'VOLT KERS', 'HYBRID BOOST SYSTEMS', 512, 128, aniso),
+    makeTextBoardTexture('#f8fafc', '#0f172a', '#16a34a', 'MOTOCRONO', 'OFFICIAL RACE TIMING', 512, 128, aniso),
+    makeTextBoardTexture('#1e1b4b', '#f8fafc', '#f97316', 'APEX OIL', 'RACING 4T SYNTHETIC', 512, 128, aniso),
+  ];
+
   return {
     asphaltMap,
     asphaltBump,
@@ -265,6 +274,7 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
     brakeBoard150Map,
     brakeBoard100Map,
     brakeBoard50Map,
+    billboardMaps,
     dispose: () => {
       asphaltMap.dispose();
       asphaltBump.dispose();
@@ -279,6 +289,7 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
       brakeBoard150Map.dispose();
       brakeBoard100Map.dispose();
       brakeBoard50Map.dispose();
+      billboardMaps.forEach((b) => b.dispose());
     },
   };
 }

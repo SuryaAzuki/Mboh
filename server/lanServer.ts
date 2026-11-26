@@ -1,15 +1,23 @@
 import os from 'node:os';
 import type { Server as HttpServer } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
-import type { BikeClassId, LanPlayerInfo, LanRoomState, RiderNetState } from '../src/game/types';
+import type { BikeClassId, CircuitId, LanPlayerInfo, LanRoomState, RiderNetState } from '../src/game/types';
 
 const VALID_CLASSES = new Set<BikeClassId>(['moto3', 'moto2', 'motogp']);
+const VALID_CIRCUITS = new Set<CircuitId>(['lusail', 'mugello', 'assen', 'motegi', 'mandalika', 'sepang']);
 
 function parseBikeClass(val: unknown): BikeClassId {
   if (typeof val === 'string' && VALID_CLASSES.has(val as BikeClassId)) {
     return val as BikeClassId;
   }
   return 'motogp';
+}
+
+function parseCircuitId(val: unknown): CircuitId {
+  if (typeof val === 'string' && VALID_CIRCUITS.has(val as CircuitId)) {
+    return val as CircuitId;
+  }
+  return 'lusail';
 }
 
 export interface LanAddressInfo {
@@ -71,6 +79,7 @@ export class LanRoomRegistry {
     playerName: string,
     liveryId: string,
     bikeClass: BikeClassId = 'motogp',
+    circuitId: CircuitId = 'lusail',
   ): LanRoomState {
     const code = generateRoomCode(new Set(this.rooms.keys()));
     const hostPlayer: LanPlayerInfo = {
@@ -86,6 +95,7 @@ export class LanRoomRegistry {
       status: 'lobby',
       totalLaps: 3,
       bikeClass: parseBikeClass(bikeClass),
+      circuitId: parseCircuitId(circuitId),
       fillWithAi: true,
       players: [hostPlayer],
     };
@@ -208,6 +218,7 @@ export function attachLanWebSocketServer(httpServer: HttpServer): {
           String(msg.name || 'Rider 1'),
           String(msg.liveryId || 'ducati'),
           parseBikeClass(msg.bikeClass),
+          parseCircuitId(msg.circuitId),
         );
         client.roomCode = room.code;
         send(ws, { type: 'room:state', room });
@@ -271,6 +282,9 @@ export function attachLanWebSocketServer(httpServer: HttpServer): {
         }
         if (typeof msg.bikeClass === 'string' && VALID_CLASSES.has(msg.bikeClass as BikeClassId)) {
           room.state.bikeClass = msg.bikeClass as BikeClassId;
+        }
+        if (typeof msg.circuitId === 'string' && VALID_CIRCUITS.has(msg.circuitId as CircuitId)) {
+          room.state.circuitId = msg.circuitId as CircuitId;
         }
         broadcastRoom(room.state.code, { type: 'room:state', room: room.state });
         return;

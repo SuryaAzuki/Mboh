@@ -1,6 +1,6 @@
 import React from 'react';
 import { CAREER_CHAMPIONSHIPS, type CareerProgress } from '../game/career';
-import { BIKE_CLASSES, type BikeClassId, type RaceResultEntry } from '../game/types';
+import { BIKE_CLASSES, type BikeClassId, type RaceResultEntry, type SessionType } from '../game/types';
 import { formatRaceTime } from './RaceHud';
 
 interface PauseModalProps {
@@ -65,6 +65,7 @@ export interface CareerFinishOutcome {
 }
 
 interface FinishModalProps {
+  sessionType: SessionType;
   results: RaceResultEntry[];
   isLan: boolean;
   careerOutcome: CareerFinishOutcome | null;
@@ -73,6 +74,7 @@ interface FinishModalProps {
 }
 
 export const FinishModal: React.FC<FinishModalProps> = ({
+  sessionType,
   results,
   isLan,
   careerOutcome,
@@ -81,6 +83,7 @@ export const FinishModal: React.FC<FinishModalProps> = ({
 }) => {
   const playerEntry = results.find((r) => r.isPlayer) ?? results[0];
   const won = playerEntry?.rank === 1;
+  const isQualifying = sessionType === 'qualifying';
 
   const activeChamp = careerOutcome
     ? CAREER_CHAMPIONSHIPS[careerOutcome.updatedProgress.activeClass]
@@ -95,15 +98,21 @@ export const FinishModal: React.FC<FinishModalProps> = ({
       className="fixed inset-0 z-30 bg-black/75 flex items-center justify-center p-4"
       role="dialog"
       aria-modal="true"
-      aria-label="Race Classification"
+      aria-label={isQualifying ? 'Qualifying Classification' : 'Race Classification'}
     >
       <div className="w-full max-w-lg bg-[#0d131f] border border-slate-700 rounded-xl p-6 shadow-2xl max-h-[92vh] overflow-y-auto">
         <div className="text-center mb-4">
           <div className="text-xs font-bold uppercase tracking-widest text-amber-400">
-            Checkered Flag
+            {isQualifying ? 'Qualifying Complete' : 'Checkered Flag'}
           </div>
           <h2 className="text-3xl font-black italic uppercase text-white mt-0.5">
-            {won ? 'Grand Prix Victory!' : `Finished P${playerEntry?.rank ?? 1}`}
+            {isQualifying
+              ? won
+                ? 'Pole Position! P1'
+                : `Qualified P${playerEntry?.rank ?? 1}`
+              : won
+              ? 'Grand Prix Victory!'
+              : `Finished P${playerEntry?.rank ?? 1}`}
           </h2>
         </div>
 
@@ -158,15 +167,23 @@ export const FinishModal: React.FC<FinishModalProps> = ({
         {playerEntry && (
           <div className="grid grid-cols-3 gap-2.5 mb-5">
             <div className="bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-center">
-              <div className="text-[10px] font-bold uppercase text-slate-400">Race Time</div>
+              <div className="text-[10px] font-bold uppercase text-slate-400">
+                {isQualifying ? 'Quali Time' : 'Race Time'}
+              </div>
               <div className="text-base font-black text-white tabular-nums">
                 {formatRaceTime(playerEntry.finishTimeMs)}
               </div>
             </div>
             <div className="bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-center">
-              <div className="text-[10px] font-bold uppercase text-slate-400">Best Lap</div>
+              <div className="text-[10px] font-bold uppercase text-slate-400">
+                {isQualifying ? 'Grid Slot' : 'Best Lap'}
+              </div>
               <div className="text-base font-black text-amber-400 tabular-nums">
-                {playerEntry.bestLapMs ? formatRaceTime(playerEntry.bestLapMs) : '--:--.-'}
+                {isQualifying
+                  ? `P${playerEntry.rank}/${results.length}`
+                  : playerEntry.bestLapMs
+                  ? formatRaceTime(playerEntry.bestLapMs)
+                  : '--:--.-'}
               </div>
             </div>
             <div className="bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-center">
@@ -218,6 +235,8 @@ export const FinishModal: React.FC<FinishModalProps> = ({
           >
             {isLan
               ? 'Return to Lobby'
+              : isQualifying
+              ? `Start Race (P${playerEntry?.rank ?? 1})`
               : careerOutcome
               ? 'Next GP Round'
               : 'Race Again'}
@@ -227,7 +246,7 @@ export const FinishModal: React.FC<FinishModalProps> = ({
             onClick={onExitTitle}
             className="py-3 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 font-bold uppercase text-sm cursor-pointer"
           >
-            Main Menu
+            {isQualifying ? 'Career Paddock' : 'Main Menu'}
           </button>
         </div>
       </div>

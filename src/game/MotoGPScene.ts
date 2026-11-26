@@ -7,9 +7,11 @@ import {
   computeAiInput,
   createInitialBikeState,
   normalizeAngle,
+  resetBikeToTrack,
   resolveBikeCollisions,
   stepBikePhysics,
   updateRaceRankings,
+  updateSlipstreamStatus,
 } from './physics';
 import { createProceduralTextures, ProceduralTextures } from './textures';
 import { createTrackWorld, TrackWorld } from './trackMesh';
@@ -19,18 +21,22 @@ import {
   type BikeClassId,
   BikeState,
   CameraMode,
+  type CircuitId,
   GameScreenState,
   HudSnapshot,
   RaceResultEntry,
   RiderInput,
   RiderNetState,
+  type SessionType,
   TEAM_LIVERIES,
   TeamLivery,
 } from './types';
 
 export interface RaceStartConfig {
   mode: 'solo' | 'lan' | 'career';
+  sessionType?: SessionType;
   bikeClass: BikeClassId;
+  circuitId?: CircuitId;
   totalLaps: number;
   skyMood?: 'sunny' | 'sunset' | 'overcast';
   localRiderId: string;
@@ -95,6 +101,7 @@ export class MotoGPScene {
   private gameState: GameScreenState = 'title';
   private cameraMode: CameraMode = 'chase';
   private raceMode: 'solo' | 'lan' | 'career' = 'solo';
+  private sessionType: SessionType = 'race';
 
   private sky!: Sky;
   private sunLight!: THREE.DirectionalLight;
@@ -108,6 +115,7 @@ export class MotoGPScene {
   private lastHudEmit = 0;
   private lastNetEmit = 0;
   private titlePanTime = 0;
+  private crowdTimeSec = 0;
   private wasBoosting = false;
   private prevLocalRank = 1;
 
@@ -130,7 +138,7 @@ export class MotoGPScene {
   constructor(container: HTMLElement, callbacks: SceneCallbacks) {
     this.container = container;
     this.callbacks = callbacks;
-    this.circuit = getCircuit();
+    this.circuit = getCircuit('lusail');
     this.audio = new MotoAudioEngine();
 
     this.isSoftwareGl = (() => {
@@ -235,32 +243,30 @@ export class MotoGPScene {
     this.particleMesh.instanceMatrix.needsUpdate = true;
     this.scene.add(this.particleMesh);
 
-    // Spawn initial 10-rider showcase grid for Title Screen flyover
-    const showcaseAiNames = [
-      'M. Rossi',
-      'F. Bagnaia',
-      'M. Marquez',
-      'J. Martin',
-      'F. Quartararo',
-      'A. Espargaro',
-      'E. Bastianini',
-      'B. Binder',
-      'P. Acosta',
-    ];
+    // Spawn full 22-rider showcase grid for Title Screen flyover
+    const showcaseAi = TEAM_LIVERIES.slice(1, 22);
     this.setupGrid({
       mode: 'solo',
       bikeClass: 'motogp',
       totalLaps: 3,
       skyMood: 'sunny',
       localRiderId: 'local',
-      localRiderName: 'You',
+      localRiderName: TEAM_LIVERIES[0].riderName,
       localLivery: TEAM_LIVERIES[0],
       participants: [
-        { id: 'local', name: 'You', livery: TEAM_LIVERIES[0], bikeClass: 'motogp', isPlayer: true, isRemote: false, isAi: false },
-        ...showcaseAiNames.map((name, idx) => ({
+        {
+          id: 'local',
+          name: TEAM_LIVERIES[0].riderName,
+          livery: TEAM_LIVERIES[0],
+          bikeClass: 'motogp',
+          isPlayer: true,
+          isRemote: false,
+          isAi: false,
+        },
+        ...showcaseAi.map((liv, idx) => ({
           id: `ai-${idx + 1}`,
-          name,
-          livery: TEAM_LIVERIES[(idx + 1) % TEAM_LIVERIES.length],
+          name: liv.riderName,
+          livery: liv,
           bikeClass: 'motogp' as BikeClassId,
           isPlayer: false,
           isRemote: false,
@@ -313,6 +319,24 @@ export class MotoGPScene {
   public clearInputs(): void {
     this.keys.clear();
     this.touchInput = { throttle: 0, brake: 0, steer: 0, boost: false };
+  }
+
+  public resetLocalBike(): void {
+    if (this.gameState !== 'playing' || this.countdownTimer > 0.15) return;
+    const localBike = this.bikes.find((b) => b.id === this.localBikeId) ?? this.bikes[0];
+    if (!localBike || localBike.finished) return;
+
+    resetBikeToTrack(localBike, this.circuit);
+    this.trauma = 0;
+    this.hitstopTimer = 0;
+    this.wasBoosting = false;
+    this.syncVisualRig(localBike, 0);
+
+    const fwdX = Math.sin(localBike.heading);
+    const fwdZ = Math.cos(localBike.heading);
+    this.camera.up.set(0, 1, 0);
+    this.camera.position.set(localBike.x - fwdX * 4.2, 1.82, localBike.z - fwdZ * 4.2);
+    this.camera.lookAt(localBike.x + fwdX * 14, 1.05, localBike.z + fwdZ * 14);
   }
 
   public setGameState(state: GameScreenState): void {
@@ -375,13 +399,25 @@ export class MotoGPScene {
     }
   }
 
+  public setCircuit(circuitId: CircuitId): void {
+    if (this.circuit.id === circuitId) return;
+    this.circuit = getCircuit(circuitId);
+    this.scene.remove(this.trackWorld.group);
+    this.trackWorld.dispose();
+    this.trackWorld = createTrackWorld(this.circuit, this.textures);
+    this.scene.add(this.trackWorld.group);
+  }
+
   public startRace(config: RaceStartConfig): void {
     this.audio.unlock();
     this.audio.setBgmMode('race');
+    if (config.circuitId) {
+      this.setCircuit(config.circuitId);
+    }
     this.applySkyMood(config.skyMood ?? 'sunny');
     this.setupGrid(config);
     this.gameState = 'playing';
-    this.countdownTimer = 2.4;
+    this.countdownTimer = config.sessionType === 'qualifying' ? 1.6 : 2.4;
     this.lastCountdownStage = 4;
     this.raceElapsedMs = 0;
     this.trauma = 0;
@@ -390,7 +426,8 @@ export class MotoGPScene {
     this.clearInputs();
     this.trackWorld.setStartLights(0, false);
 
-    // Snap camera immediately behind local player bike upright
+    // Snap camera immediately behind local player bike upright and populate initial HUD/minimap
+    updateRaceRankings(this.bikes);
     const localBike = this.bikes.find((b) => b.id === this.localBikeId) ?? this.bikes[0];
     if (localBike) {
       this.prevLocalRank = localBike.rank;
@@ -400,40 +437,35 @@ export class MotoGPScene {
       this.camera.position.set(localBike.x - fwdX * 4.2, 1.82, localBike.z - fwdZ * 4.2);
       this.camera.lookAt(localBike.x + fwdX * 14, 1.05, localBike.z + fwdZ * 14);
     }
+    this.emitHudSnapshot(performance.now(), Math.ceil(this.countdownTimer), false, true);
+    this.renderer.render(this.scene, this.camera);
   }
 
-  public updateShowcaseBike(livery: TeamLivery, bikeClass: BikeClassId): void {
+  public updateShowcaseBike(livery: TeamLivery, bikeClass: BikeClassId, circuitId?: CircuitId): void {
     if (this.gameState !== 'title') return;
+    const circuitChanged = Boolean(circuitId && circuitId !== this.circuit.id);
+    if (circuitId && circuitChanged) {
+      this.setCircuit(circuitId);
+    }
     const localBike = this.bikes.find((b) => b.id === this.localBikeId) ?? this.bikes[0];
     if (!localBike) return;
-    if (localBike.livery.id === livery.id && localBike.bikeClass === bikeClass) return;
+    if (!circuitChanged && localBike.livery.id === livery.id && localBike.bikeClass === bikeClass) return;
 
     const usedIds = new Set([livery.id]);
-    const aiLiveries = TEAM_LIVERIES.filter((l) => !usedIds.has(l.id));
-    const aiNames = [
-      'M. Rossi',
-      'F. Bagnaia',
-      'M. Marquez',
-      'J. Martin',
-      'F. Quartararo',
-      'A. Espargaro',
-      'E. Bastianini',
-      'B. Binder',
-      'P. Acosta',
-    ];
+    const aiLiveries = TEAM_LIVERIES.filter((l) => !usedIds.has(l.id)).slice(0, 21);
     this.setupGrid({
       mode: 'solo',
       bikeClass,
       totalLaps: 3,
       localRiderId: 'local',
-      localRiderName: 'You',
+      localRiderName: livery.riderName,
       localLivery: livery,
       participants: [
-        { id: 'local', name: 'You', livery, bikeClass, isPlayer: true, isRemote: false, isAi: false },
-        ...aiNames.map((name, idx) => ({
+        { id: 'local', name: livery.riderName, livery, bikeClass, isPlayer: true, isRemote: false, isAi: false },
+        ...aiLiveries.map((aiLiv, idx) => ({
           id: `ai-${idx + 1}`,
-          name,
-          livery: aiLiveries[idx % aiLiveries.length],
+          name: aiLiv.riderName,
+          livery: aiLiv,
           bikeClass,
           isPlayer: false,
           isRemote: false,
@@ -462,11 +494,15 @@ export class MotoGPScene {
       bike.bestLapMs = net.bestLapMs;
       bike.topSpeedKmh = net.topSpeedKmh;
       bike.isBoosting = net.isBoosting;
+      if (net.crashed !== undefined) {
+        bike.crashed = net.crashed;
+      }
     }
   }
 
   private setupGrid(config: RaceStartConfig): void {
     this.raceMode = config.mode;
+    this.sessionType = config.sessionType ?? 'race';
     this.totalLaps = config.totalLaps;
     this.localBikeId = config.localRiderId;
 
@@ -490,7 +526,7 @@ export class MotoGPScene {
         isPlayer: p.isPlayer,
         isRemote: p.isRemote,
         isAi: p.isAi,
-        aiPaceFactor: p.aiPaceFactor ?? (0.86 + (idx % 3) * 0.045),
+        aiPaceFactor: p.aiPaceFactor ?? (0.94 + (idx % 4) * 0.025),
       });
       this.bikes.push(bike);
 
@@ -576,18 +612,41 @@ export class MotoGPScene {
     rig.frontWheel.rotation.x = bike.wheelSpin;
     rig.rearWheel.rotation.x = bike.wheelSpin;
 
+    // Tip & slide bike fairing on crash
+    if (bike.crashed) {
+      rig.leanGroup.position.y = -0.16;
+      rig.leanGroup.rotation.y = bike.crashSlideYaw;
+    } else {
+      rig.leanGroup.position.y = 0;
+      rig.leanGroup.rotation.y = 0;
+    }
+
     // Rider shifts inside toward corner apex
     rig.riderGroup.position.x = -Math.sin(bike.leanAngle) * 0.22;
     rig.riderGroup.rotation.z = bike.leanAngle * 0.28;
 
-    // Boost flame flicker
-    rig.exhaustFlame.visible = bike.isBoosting;
-    if (bike.isBoosting) {
+    // Boost flame flicker (off while crashed)
+    rig.exhaustFlame.visible = bike.isBoosting && !bike.crashed;
+    if (rig.exhaustFlame.visible) {
       rig.exhaustFlame.scale.set(1, 1, 0.8 + Math.random() * 0.6);
     }
 
-    // Emit gravel dust or tire smoke at high lean
-    if (bike.speed > 18 && (bike.surface === 'gravel' || Math.abs(bike.leanAngle) > 0.68)) {
+    // Emit crash sparks, gravel dust, or tire smoke at high lean
+    if (bike.crashed && bike.speed > 4) {
+      if (Math.random() < dt * 36) {
+        this.spawnParticle(
+          bike.x + (Math.random() - 0.5) * 0.5,
+          0.16,
+          bike.z + (Math.random() - 0.5) * 0.5,
+          (Math.random() - 0.5) * 5,
+          1.4 + Math.random() * 2.4,
+          (Math.random() - 0.5) * 5,
+          bike.surface === 'asphalt' || bike.surface === 'curb' ? 0.55 : 1.05,
+          bike.surface === 'asphalt' || bike.surface === 'curb' ? 0xf97316 : 0xb7a994,
+          0.34,
+        );
+      }
+    } else if (bike.speed > 18 && (bike.surface === 'gravel' || Math.abs(bike.leanAngle) > 0.68)) {
       if (Math.random() < dt * 22) {
         const isGravel = bike.surface === 'gravel';
         this.spawnParticle(
@@ -607,18 +666,28 @@ export class MotoGPScene {
 
   private stepTitleShowcase(dt: number): void {
     this.titlePanTime += dt;
+    const localBike = this.bikes.find((b) => b.id === this.localBikeId) ?? this.bikes[0];
     const gantrySample = sampleTrackAtS(this.circuit, START_LINE_S);
     const sway = Math.sin(this.titlePanTime * 0.45);
-    // Hero rear-quarter angle showcasing the detailed motorcycle & grandstands across the pit straight
-    const camX = gantrySample.x - 5.2 + sway * 2.4;
-    const camZ = gantrySample.z - 16.8 + Math.cos(this.titlePanTime * 0.32) * 1.8;
-    this.camera.up.set(0, 1, 0);
-    this.camera.position.set(camX, 2.35 + Math.sin(this.titlePanTime * 0.35) * 0.35, camZ);
-    this.camera.lookAt(gantrySample.x + 1.8, 1.05, gantrySample.z - 5.2);
+    if (localBike) {
+      // Hero rear-quarter orbit framing the selected rider bike cleanly on the right of the menu
+      const camX = localBike.x - 3.1 + sway * 1.1;
+      const camZ = localBike.z - 4.4 + Math.cos(this.titlePanTime * 0.32) * 0.7;
+      this.camera.up.set(0, 1, 0);
+      this.camera.position.set(camX, 1.72 + Math.sin(this.titlePanTime * 0.35) * 0.22, camZ);
+      this.camera.lookAt(localBike.x - 0.85, 0.92, localBike.z + 3.2);
+    } else {
+      const camX = gantrySample.x - 3.6 + sway * 1.6;
+      const camZ = gantrySample.z - 14.5;
+      this.camera.up.set(0, 1, 0);
+      this.camera.position.set(camX, 2.1, camZ);
+      this.camera.lookAt(gantrySample.x, 1.0, gantrySample.z);
+    }
 
     for (const bike of this.bikes) {
       this.syncVisualRig(bike, dt);
     }
+    this.trackWorld.updateCrowd(this.titlePanTime, gantrySample.x, gantrySample.z);
   }
 
   private stepPlaying(dt: number, now: number): void {
@@ -669,6 +738,10 @@ export class MotoGPScene {
     let localWrongWay = false;
     const localBike = this.bikes.find((b) => b.id === this.localBikeId) ?? this.bikes[0];
 
+    if (canMove) {
+      updateSlipstreamStatus(this.bikes, this.circuit);
+    }
+
     for (const bike of this.bikes) {
       if (bike.isRemote) {
         // Smoothly interpolate remote LAN players
@@ -693,7 +766,57 @@ export class MotoGPScene {
       }
 
       const input = bike.isPlayer ? localInput : computeAiInput(bike, this.circuit, this.bikes);
-      const res = stepBikePhysics(bike, input, dt, this.circuit, this.raceElapsedMs, this.totalLaps, canMove);
+      const res = stepBikePhysics(
+        bike,
+        input,
+        dt,
+        this.circuit,
+        this.raceElapsedMs,
+        this.totalLaps,
+        canMove,
+        this.trackWorld.colliders,
+      );
+
+      if (res.solidImpact) {
+        if (bike.isPlayer) {
+          this.trauma = Math.min(1, this.trauma + 0.32 + res.solidImpact.intensity * 0.45);
+          this.audio.playImpact(res.solidImpact.intensity);
+        }
+        for (let k = 0; k < 8; k++) {
+          this.spawnParticle(
+            res.solidImpact.x,
+            0.65,
+            res.solidImpact.z,
+            (Math.random() - 0.5) * 8,
+            2 + Math.random() * 3.5,
+            (Math.random() - 0.5) * 8,
+            0.58,
+            0xfbbf24,
+            0.28,
+          );
+        }
+      }
+
+      if (res.justCrashed) {
+        if (bike.isPlayer) {
+          this.trauma = 0.85;
+          this.hitstopTimer = 0.04;
+          this.audio.playImpact(1.0);
+        }
+        for (let k = 0; k < 14; k++) {
+          this.spawnParticle(
+            bike.x,
+            0.45,
+            bike.z,
+            (Math.random() - 0.5) * 10,
+            2.4 + Math.random() * 4.5,
+            (Math.random() - 0.5) * 10,
+            0.7,
+            0xf97316,
+            0.38,
+          );
+        }
+      }
 
       if (bike.isPlayer) {
         localWrongWay = res.wrongWay;
@@ -710,16 +833,19 @@ export class MotoGPScene {
       this.syncVisualRig(bike, dt);
     }
 
-    // Soft bike-to-bike collisions
+    // Bike-to-bike collisions (with high-speed crash knockdowns)
     const impacts = resolveBikeCollisions(this.bikes);
     if (impacts.length > 0) {
       for (const imp of impacts) {
-        if (imp.aId === this.localBikeId || imp.bId === this.localBikeId) {
-          this.trauma = Math.min(1, this.trauma + 0.35 + imp.intensity * 0.45);
-          this.hitstopTimer = 0.035;
-          this.audio.playImpact(imp.intensity);
+        const localHit = imp.aId === this.localBikeId || imp.bId === this.localBikeId;
+        const localCrashed = imp.crashedIds.includes(this.localBikeId);
+        if (localHit || localCrashed) {
+          this.trauma = Math.min(1, this.trauma + (localCrashed ? 0.85 : 0.35 + imp.intensity * 0.45));
+          this.hitstopTimer = localCrashed ? 0.045 : 0.035;
+          this.audio.playImpact(localCrashed ? 1.0 : imp.intensity);
         }
-        for (let k = 0; k < 10; k++) {
+        const particleCount = imp.crashedIds.length > 0 ? 14 : 10;
+        for (let k = 0; k < particleCount; k++) {
           this.spawnParticle(
             imp.x,
             0.55,
@@ -728,8 +854,8 @@ export class MotoGPScene {
             2.5 + Math.random() * 4,
             (Math.random() - 0.5) * 9,
             0.65,
-            0xfbbf24,
-            0.32,
+            imp.crashedIds.length > 0 ? 0xf97316 : 0xfbbf24,
+            0.34,
           );
         }
       }
@@ -738,7 +864,13 @@ export class MotoGPScene {
     updateRaceRankings(this.bikes);
 
     if (localBike) {
-      this.audio.updateEngine(localBike.rpm, localInput.throttle, localBike.isBoosting, true, localBike.bikeClass);
+      this.audio.updateEngine(
+        localBike.rpm,
+        localBike.crashed ? 0 : localInput.throttle,
+        localBike.isBoosting,
+        true,
+        localBike.bikeClass,
+      );
       this.audio.updateSurfaceSfx(localBike.surface, localBike.speed, canMove);
       if (localBike.isBoosting && !this.wasBoosting && canMove) {
         this.audio.playBoostStart();
@@ -751,6 +883,12 @@ export class MotoGPScene {
       this.prevLocalRank = localBike.rank;
     }
 
+    this.crowdTimeSec += dt;
+    this.trackWorld.updateCrowd(
+      this.crowdTimeSec,
+      localBike ? localBike.x : 0,
+      localBike ? localBike.z : 0,
+    );
     this.updateParticles(dt);
     this.updateCamera(dt);
 
@@ -773,39 +911,61 @@ export class MotoGPScene {
         bestLapMs: localBike.bestLapMs,
         topSpeedKmh: localBike.topSpeedKmh,
         isBoosting: localBike.isBoosting,
+        crashed: localBike.crashed,
       });
     }
 
-    // Throttle React HUD state updates to <= 12Hz
-    if (localBike && now - this.lastHudEmit >= 85) {
-      this.lastHudEmit = now;
-      const spec = BIKE_CLASSES[localBike.bikeClass];
-      this.callbacks.onHudUpdate({
-        speedKmh: Math.round(localBike.speed * 3.6),
-        gear: localBike.gear,
-        rpmRatio: Math.min(1, Math.max(0, (localBike.rpm - 3500) / (spec.maxRpm - 3500))),
-        boostFuel: Math.round(localBike.boostFuel),
-        isBoosting: localBike.isBoosting,
-        lap: localBike.lap,
-        totalLaps: this.totalLaps,
-        rank: localBike.rank,
-        totalRiders: this.bikes.length,
-        raceTimeMs: Math.round(this.raceElapsedMs),
-        currentLapMs: Math.round(Math.max(0, this.raceElapsedMs - localBike.currentLapStartMs)),
-        bestLapMs: localBike.bestLapMs ? Math.round(localBike.bestLapMs) : null,
-        countdownStage: this.countdownTimer > 0 ? countdownStage : this.raceElapsedMs < 1100 ? 0 : -1,
-        surface: localBike.surface,
-        wrongWay: localWrongWay,
-        bikeClass: localBike.bikeClass,
-        minimapRiders: this.bikes.map((b) => ({
-          id: b.id,
-          x: b.x,
-          z: b.z,
-          color: b.livery.primaryHex,
-          isPlayer: b.isPlayer,
-        })),
-      });
-    }
+    this.emitHudSnapshot(now, countdownStage, localWrongWay, false);
+  }
+
+  private emitHudSnapshot(
+    now: number,
+    countdownStage: number,
+    localWrongWay: boolean,
+    force: boolean,
+  ): void {
+    const localBike = this.bikes.find((b) => b.id === this.localBikeId) ?? this.bikes[0];
+    if (!localBike || (!force && now - this.lastHudEmit < 85)) return;
+
+    this.lastHudEmit = now;
+    const spec = BIKE_CLASSES[localBike.bikeClass];
+    const sortedStandings = [...this.bikes].sort((a, b) => a.rank - b.rank);
+    this.callbacks.onHudUpdate({
+      sessionType: this.sessionType,
+      speedKmh: Math.round(localBike.speed * 3.6),
+      gear: localBike.gear,
+      rpmRatio: Math.min(1, Math.max(0, (localBike.rpm - 3500) / (spec.maxRpm - 3500))),
+      boostFuel: Math.round(localBike.boostFuel),
+      isBoosting: localBike.isBoosting,
+      lap: localBike.lap,
+      totalLaps: this.totalLaps,
+      rank: localBike.rank,
+      totalRiders: this.bikes.length,
+      raceTimeMs: Math.round(this.raceElapsedMs),
+      currentLapMs: Math.round(Math.max(0, this.raceElapsedMs - localBike.currentLapStartMs)),
+      bestLapMs: localBike.bestLapMs ? Math.round(localBike.bestLapMs) : null,
+      countdownStage: this.countdownTimer > 0 ? countdownStage : this.raceElapsedMs < 1100 ? 0 : -1,
+      surface: localBike.surface,
+      wrongWay: localWrongWay,
+      crashed: localBike.crashed,
+      crashRecoverSec: Math.max(0, Number(localBike.crashTimer.toFixed(1))),
+      bikeClass: localBike.bikeClass,
+      leaderboard: sortedStandings.map((b) => ({
+        id: b.id,
+        rank: b.rank,
+        name: b.name,
+        color: b.livery.primaryHex,
+        isPlayer: b.isPlayer,
+        crashed: b.crashed,
+      })),
+      minimapRiders: this.bikes.map((b) => ({
+        id: b.id,
+        x: b.x,
+        z: b.z,
+        color: b.livery.primaryHex,
+        isPlayer: b.isPlayer,
+      })),
+    });
   }
 
   private triggerRaceFinish(): void {
@@ -836,10 +996,11 @@ export class MotoGPScene {
     this.camera.up.set(0, 1, 0);
 
     if (this.cameraMode === 'chase') {
-      const dist = 4.1 + (localBike.speed / 92) * 1.1;
+      // Fixed chase distance so high speed keeps the bike consistent without zooming out
+      const dist = 4.2;
       _camTargetPos.set(localBike.x - fwdX * dist, 1.82, localBike.z - fwdZ * dist);
       _camLookAt.set(localBike.x + fwdX * 14, 1.05, localBike.z + fwdZ * 14);
-      const damp = 1 - Math.exp(-10 * dt);
+      const damp = 1 - Math.exp(-12 * dt);
       this.camera.position.lerp(_camTargetPos, damp);
       this.camera.lookAt(_camLookAt);
     } else if (this.cameraMode === 'helmet') {
@@ -864,10 +1025,12 @@ export class MotoGPScene {
       this.camera.lookAt(_camLookAt);
     }
 
-    // Dynamic speed FOV kick + gravel rumble / impact trauma position shake (never flips orientation)
-    const targetFov = 62 + (localBike.speed / 92) * 15 + (localBike.isBoosting ? 5 : 0);
-    this.camera.fov = THREE.MathUtils.damp(this.camera.fov, targetFov, 7, dt);
-    this.camera.updateProjectionMatrix();
+    // Lock FOV steady at high speed (never zoom out on straightaways or KERS boost)
+    const targetFov = 62;
+    if (Math.abs(this.camera.fov - targetFov) > 0.05) {
+      this.camera.fov = THREE.MathUtils.damp(this.camera.fov, targetFov, 10, dt);
+      this.camera.updateProjectionMatrix();
+    }
 
     if (localBike.surface === 'gravel' && localBike.speed > 10) {
       this.trauma = Math.max(this.trauma, 0.16);
@@ -961,6 +1124,8 @@ export class MotoGPScene {
         this.cycleCameraMode();
       } else if (e.code === 'KeyM') {
         this.audio.toggleMute();
+      } else if (e.code === 'KeyR') {
+        this.resetLocalBike();
       }
     }
   };

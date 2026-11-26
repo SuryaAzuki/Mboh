@@ -1,8 +1,10 @@
 import React, { useEffect, useState } from 'react';
+import { CIRCUIT_LIST } from '../game/trackMath';
 import {
   BIKE_CLASSES,
   TEAM_LIVERIES,
   type BikeClassId,
+  type CircuitId,
   type LanRoomState,
   type TeamLivery,
 } from '../game/types';
@@ -35,7 +37,7 @@ interface LanLobbyModalProps {
   onJoinRoom: (code: string) => void;
   onLeaveRoom: () => void;
   onToggleReady: () => void;
-  onUpdateSettings: (patch: { totalLaps?: number; fillWithAi?: boolean; bikeClass?: BikeClassId }) => void;
+  onUpdateSettings: (patch: { totalLaps?: number; fillWithAi?: boolean; bikeClass?: BikeClassId; circuitId?: CircuitId }) => void;
   onStartRace: () => void;
   onRefreshRooms: () => void;
   onClose: () => void;
@@ -353,6 +355,25 @@ export const LanLobbyModal: React.FC<LanLobbyModalProps> = ({
                           <option value="moto3">Moto3</option>
                           <option value="moto2">Moto2</option>
                           <option value="motogp">MotoGP</option>
+                        </select>
+                      </label>
+
+                      <label className="text-xs text-slate-300 flex items-center gap-1.5">
+                        <span>Circuit:</span>
+                        <select
+                          aria-label="Room Circuit"
+                          disabled={!isHost}
+                          value={room.circuitId ?? 'lusail'}
+                          onChange={(e) =>
+                            onUpdateSettings({ circuitId: e.target.value as CircuitId })
+                          }
+                          className="bg-slate-800 border border-slate-600 rounded px-2 py-1 text-white text-xs font-bold"
+                        >
+                          {CIRCUIT_LIST.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.country} ({c.difficulty})
+                            </option>
+                          ))}
                         </select>
                       </label>
 

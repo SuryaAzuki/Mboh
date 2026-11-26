@@ -1,4 +1,4 @@
-import type { BikeClassId, LanRoomState, RiderNetState } from '../game/types';
+import type { BikeClassId, CircuitId, LanRoomState, RiderNetState } from '../game/types';
 
 export interface OpenRoomSummary {
   code: string;
@@ -154,8 +154,13 @@ export class LanMultiplayerClient {
     this.send({ type: 'room:list' });
   }
 
-  public createRoom(name: string, liveryId: string, bikeClass: BikeClassId = 'motogp'): void {
-    this.send({ type: 'room:create', name, liveryId, bikeClass });
+  public createRoom(
+    name: string,
+    liveryId: string,
+    bikeClass: BikeClassId = 'motogp',
+    circuitId: CircuitId = 'lusail',
+  ): void {
+    this.send({ type: 'room:create', name, liveryId, bikeClass, circuitId });
   }
 
   public joinRoom(code: string, name: string, liveryId: string): void {
@@ -170,7 +175,12 @@ export class LanMultiplayerClient {
     this.send({ type: 'room:update_player', ...patch });
   }
 
-  public updateSettings(patch: { totalLaps?: number; fillWithAi?: boolean; bikeClass?: BikeClassId }): void {
+  public updateSettings(patch: {
+    totalLaps?: number;
+    fillWithAi?: boolean;
+    bikeClass?: BikeClassId;
+    circuitId?: CircuitId;
+  }): void {
     this.send({ type: 'room:update_settings', ...patch });
   }
 
