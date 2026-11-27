@@ -2,10 +2,19 @@ import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { Sky } from 'three/addons/objects/Sky.js';
 import { MotoAudioEngine } from './audio';
-import { BikeVisualRig, createMotoBikeRig } from './bikeMesh';
+import { animateBikeRiderPose, BikeVisualRig, createMotoBikeRig } from './bikeMesh';
 import {
+  animatePodiumCeremony,
+  createPodiumStage,
+  type PodiumStage,
+  type PodiumWinnerSlot,
+} from './podiumMesh';
+import {
+  clampSteeringSensitivity,
   computeAiInput,
+  computeSteerInputStep,
   createInitialBikeState,
+  DEFAULT_STEERING_SENSITIVITY,
   normalizeAngle,
   resetBikeToTrack,
   resolveBikeCollisions,
@@ -23,6 +32,7 @@ import {
   CameraMode,
   type CircuitId,
   GameScreenState,
+  getClassLiveries,
   HudSnapshot,
   RaceResultEntry,
   RiderInput,
@@ -31,6 +41,11 @@ import {
   TEAM_LIVERIES,
   TeamLivery,
 } from './types';
+import {
+  createInitialWeatherState,
+  type DynamicWeatherState,
+  stepDynamicWeather,
+} from './weather';
 
 export interface RaceStartConfig {
   mode: 'solo' | 'lan' | 'career';
@@ -107,6 +122,8 @@ export class MotoGPScene {
   private sunLight!: THREE.DirectionalLight;
   private hemiLight!: THREE.HemisphereLight;
 
+  private preRaceTimer = 0;
+  private preRaceDuration = 3.0;
   private countdownTimer = 3.2;
   private lastCountdownStage = 4;
   private raceElapsedMs = 0;
@@ -116,17 +133,29 @@ export class MotoGPScene {
   private lastNetEmit = 0;
   private titlePanTime = 0;
   private crowdTimeSec = 0;
+  private podiumTimeSec = 0;
+  private podiumStage: PodiumStage | null = null;
+  private podiumOrigin = new THREE.Vector3();
   private wasBoosting = false;
   private prevLocalRank = 1;
 
   // Input state
   private keys = new Set<string>();
   private touchInput: RiderInput = { throttle: 0, brake: 0, steer: 0, boost: false };
+  private steeringSensitivity = DEFAULT_STEERING_SENSITIVITY;
+  private smoothedSteer = 0;
 
-  // Pooled InstancedMesh particles (smoke, gravel, sparks)
+  // Pooled InstancedMesh particles (smoke, gravel, sparks, water spray)
   private particleMesh: THREE.InstancedMesh;
   private particles: ParticleSlot[] = [];
   private particleCursor = 0;
+
+  // Dynamic Weather System (Clear -> Clouds -> Rain Patches + pooled falling rain streaks)
+  private baseSkyMood: 'sunny' | 'sunset' | 'overcast' = 'sunny';
+  private weatherState: DynamicWeatherState = createInitialWeatherState();
+  private rainLines: THREE.LineSegments;
+  private rainPositions: Float32Array;
+  private rainCount = 220;
 
   // Frame loop handles
   private frameId = 0;
@@ -243,6 +272,33 @@ export class MotoGPScene {
     this.particleMesh.instanceMatrix.needsUpdate = true;
     this.scene.add(this.particleMesh);
 
+    // Pooled falling rain streaks around active camera
+    this.rainPositions = new Float32Array(this.rainCount * 2 * 3);
+    for (let i = 0; i < this.rainCount; i++) {
+      const rx = (Math.random() - 0.5) * 44;
+      const ry = Math.random() * 20;
+      const rz = (Math.random() - 0.5) * 44;
+      const base = i * 6;
+      this.rainPositions[base] = rx;
+      this.rainPositions[base + 1] = ry;
+      this.rainPositions[base + 2] = rz;
+      this.rainPositions[base + 3] = rx - 0.14;
+      this.rainPositions[base + 4] = ry - 1.05;
+      this.rainPositions[base + 5] = rz - 0.14;
+    }
+    const rainGeo = new THREE.BufferGeometry();
+    rainGeo.setAttribute('position', new THREE.BufferAttribute(this.rainPositions, 3));
+    const rainMat = new THREE.LineBasicMaterial({
+      color: 0xcbeafe,
+      transparent: true,
+      opacity: 0.48,
+      depthWrite: false,
+    });
+    this.rainLines = new THREE.LineSegments(rainGeo, rainMat);
+    this.rainLines.visible = false;
+    this.rainLines.frustumCulled = false;
+    this.scene.add(this.rainLines);
+
     // Spawn full 22-rider showcase grid for Title Screen flyover
     const showcaseAi = TEAM_LIVERIES.slice(1, 22);
     this.setupGrid({
@@ -279,6 +335,9 @@ export class MotoGPScene {
       this.renderer.compile(this.scene, this.camera);
     }
 
+    this.stepTitleShowcase(0.016);
+    this.renderer.render(this.scene, this.camera);
+
     // Event listeners (also unlock audio on first user pointer interaction for title BGM)
     window.addEventListener('pointerdown', this.handleFirstInteract, { passive: true });
     window.addEventListener('keydown', this.handleKeyDown);
@@ -312,6 +371,14 @@ export class MotoGPScene {
     return this.cameraMode;
   }
 
+  public setSteeringSensitivity(value: number): void {
+    this.steeringSensitivity = clampSteeringSensitivity(value);
+  }
+
+  public getSteeringSensitivity(): number {
+    return this.steeringSensitivity;
+  }
+
   public setTouchInput(partial: Partial<RiderInput>): void {
     Object.assign(this.touchInput, partial);
   }
@@ -319,10 +386,25 @@ export class MotoGPScene {
   public clearInputs(): void {
     this.keys.clear();
     this.touchInput = { throttle: 0, brake: 0, steer: 0, boost: false };
+    this.smoothedSteer = 0;
+  }
+
+  public skipPreRace(): void {
+    if (this.gameState !== 'playing' || this.preRaceTimer <= 0) return;
+    this.preRaceTimer = 0;
+    const localBike = this.bikes.find((b) => b.id === this.localBikeId) ?? this.bikes[0];
+    if (localBike) {
+      const fwdX = Math.sin(localBike.heading);
+      const fwdZ = Math.cos(localBike.heading);
+      this.camera.up.set(0, 1, 0);
+      this.camera.position.set(localBike.x - fwdX * 4.2, 1.82, localBike.z - fwdZ * 4.2);
+      this.camera.lookAt(localBike.x + fwdX * 14, 1.05, localBike.z + fwdZ * 14);
+    }
+    this.emitHudSnapshot(performance.now(), Math.ceil(this.countdownTimer), false, true);
   }
 
   public resetLocalBike(): void {
-    if (this.gameState !== 'playing' || this.countdownTimer > 0.15) return;
+    if (this.gameState !== 'playing' || this.preRaceTimer > 0 || this.countdownTimer > 0.15) return;
     const localBike = this.bikes.find((b) => b.id === this.localBikeId) ?? this.bikes[0];
     if (!localBike || localBike.finished) return;
 
@@ -330,7 +412,7 @@ export class MotoGPScene {
     this.trauma = 0;
     this.hitstopTimer = 0;
     this.wasBoosting = false;
-    this.syncVisualRig(localBike, 0);
+    this.syncVisualRig(localBike, 0, 0, false);
 
     const fwdX = Math.sin(localBike.heading);
     const fwdZ = Math.cos(localBike.heading);
@@ -339,13 +421,26 @@ export class MotoGPScene {
     this.camera.lookAt(localBike.x + fwdX * 14, 1.05, localBike.z + fwdZ * 14);
   }
 
+  private clearPodiumStage(): void {
+    if (this.podiumStage) {
+      this.scene.remove(this.podiumStage.group);
+      this.podiumStage.dispose();
+      this.podiumStage = null;
+    }
+    for (const rig of this.bikeRigs.values()) {
+      rig.root.visible = true;
+    }
+  }
+
   public setGameState(state: GameScreenState): void {
     this.gameState = state;
     if (state === 'title') {
+      this.clearPodiumStage();
       this.audio.silenceEngine();
       this.audio.setBgmMode('title');
       this.clearInputs();
     } else if (state === 'playing') {
+      this.clearPodiumStage();
       this.audio.unlock();
       this.audio.setBgmMode('race');
     } else {
@@ -356,6 +451,7 @@ export class MotoGPScene {
   }
 
   public applySkyMood(mood: 'sunny' | 'sunset' | 'overcast' = 'sunny'): void {
+    this.baseSkyMood = mood;
     const skyUniforms = this.sky.material.uniforms;
     if (mood === 'sunset') {
       const sunVec = new THREE.Vector3().setFromSphericalCoords(1, THREE.MathUtils.degToRad(81), THREE.MathUtils.degToRad(132));
@@ -409,14 +505,20 @@ export class MotoGPScene {
   }
 
   public startRace(config: RaceStartConfig): void {
+    this.clearPodiumStage();
     this.audio.unlock();
     this.audio.setBgmMode('race');
     if (config.circuitId) {
       this.setCircuit(config.circuitId);
     }
     this.applySkyMood(config.skyMood ?? 'sunny');
+    this.weatherState = createInitialWeatherState(Math.round(performance.now()) + config.participants.length * 97);
+    this.trackWorld.syncRainPatches([], 0);
+    this.rainLines.visible = false;
     this.setupGrid(config);
     this.gameState = 'playing';
+    this.preRaceDuration = config.sessionType === 'qualifying' ? 7.5 : 11.5;
+    this.preRaceTimer = this.preRaceDuration;
     this.countdownTimer = config.sessionType === 'qualifying' ? 1.6 : 2.4;
     this.lastCountdownStage = 4;
     this.raceElapsedMs = 0;
@@ -426,18 +528,17 @@ export class MotoGPScene {
     this.clearInputs();
     this.trackWorld.setStartLights(0, false);
 
-    // Snap camera immediately behind local player bike upright and populate initial HUD/minimap
+    // Populate initial HUD & position camera on the before-race grid vista
     updateRaceRankings(this.bikes);
     const localBike = this.bikes.find((b) => b.id === this.localBikeId) ?? this.bikes[0];
     if (localBike) {
       this.prevLocalRank = localBike.rank;
-      const fwdX = Math.sin(localBike.heading);
-      const fwdZ = Math.cos(localBike.heading);
-      this.camera.up.set(0, 1, 0);
-      this.camera.position.set(localBike.x - fwdX * 4.2, 1.82, localBike.z - fwdZ * 4.2);
-      this.camera.lookAt(localBike.x + fwdX * 14, 1.05, localBike.z + fwdZ * 14);
     }
-    this.emitHudSnapshot(performance.now(), Math.ceil(this.countdownTimer), false, true);
+    this.updatePreRaceCamera(0);
+    for (const bike of this.bikes) {
+      this.syncVisualRig(bike, 0, 0, true);
+    }
+    this.emitHudSnapshot(performance.now(), -1, false, true);
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -452,7 +553,7 @@ export class MotoGPScene {
     if (!circuitChanged && localBike.livery.id === livery.id && localBike.bikeClass === bikeClass) return;
 
     const usedIds = new Set([livery.id]);
-    const aiLiveries = TEAM_LIVERIES.filter((l) => !usedIds.has(l.id)).slice(0, 21);
+    const aiLiveries = getClassLiveries(bikeClass).filter((l) => !usedIds.has(l.id)).slice(0, 21);
     this.setupGrid({
       mode: 'solo',
       bikeClass,
@@ -473,6 +574,8 @@ export class MotoGPScene {
         })),
       ],
     });
+    this.stepTitleShowcase(0.016);
+    this.renderer.render(this.scene, this.camera);
   }
 
   public applyRemoteStates(states: RiderNetState[]): void {
@@ -538,7 +641,7 @@ export class MotoGPScene {
     });
   }
 
-  private readLocalInput(): RiderInput {
+  private readLocalInput(dt = 0.016): RiderInput {
     const up = this.keys.has('KeyW') || this.keys.has('ArrowUp');
     const down = this.keys.has('KeyS') || this.keys.has('ArrowDown');
     const left = this.keys.has('KeyA') || this.keys.has('ArrowLeft');
@@ -547,11 +650,12 @@ export class MotoGPScene {
 
     const throttle = Math.max(up ? 1 : 0, this.touchInput.throttle);
     const brake = Math.max(down ? 1 : 0, this.touchInput.brake);
-    let steer = (right ? 1 : 0) - (left ? 1 : 0);
-    if (steer === 0) steer = this.touchInput.steer;
+    let rawSteer = (right ? 1 : 0) - (left ? 1 : 0);
+    if (rawSteer === 0) rawSteer = this.touchInput.steer;
+    this.smoothedSteer = computeSteerInputStep(rawSteer, this.smoothedSteer, this.steeringSensitivity, dt);
     const boost = shift || this.touchInput.boost;
 
-    return { throttle, brake, steer, boost };
+    return { throttle, brake, steer: this.smoothedSteer, boost };
   }
 
   private spawnParticle(x: number, y: number, z: number, vx: number, vy: number, vz: number, scale: number, colorHex: number, maxLife = 0.4): void {
@@ -602,7 +706,7 @@ export class MotoGPScene {
     }
   }
 
-  private syncVisualRig(bike: BikeState, dt: number): void {
+  private syncVisualRig(bike: BikeState, dt: number, brakeAmount = 0, preRaceIdle = false): void {
     const rig = this.bikeRigs.get(bike.id);
     if (!rig) return;
     rig.root.position.set(bike.x, 0, bike.z);
@@ -621,9 +725,21 @@ export class MotoGPScene {
       rig.leanGroup.rotation.y = 0;
     }
 
-    // Rider shifts inside toward corner apex
-    rig.riderGroup.position.x = -Math.sin(bike.leanAngle) * 0.22;
-    rig.riderGroup.rotation.z = bike.leanAngle * 0.28;
+    // Detailed articulated rider pose animation (hang-off, knee drop, aero tuck, braking, pre-race idle, hands on bars, feet animation)
+    const riderSeed = bike.livery.number * 0.37;
+    animateBikeRiderPose(rig, {
+      speed: bike.speed,
+      leanAngle: bike.leanAngle,
+      steerVisual: bike.steerVisual,
+      gear: bike.gear,
+      brake: brakeAmount,
+      isBoosting: bike.isBoosting,
+      crashed: bike.crashed,
+      preRaceIdle,
+      timeSec: this.crowdTimeSec + this.titlePanTime,
+      riderSeed,
+      dt,
+    });
 
     // Boost flame flicker (off while crashed)
     rig.exhaustFlame.visible = bike.isBoosting && !bike.crashed;
@@ -631,7 +747,7 @@ export class MotoGPScene {
       rig.exhaustFlame.scale.set(1, 1, 0.8 + Math.random() * 0.6);
     }
 
-    // Emit crash sparks, gravel dust, or tire smoke at high lean
+    // Emit crash sparks, gravel dust, water spray on rain patches, or tire smoke at high lean
     if (bike.crashed && bike.speed > 4) {
       if (Math.random() < dt * 36) {
         this.spawnParticle(
@@ -644,6 +760,23 @@ export class MotoGPScene {
           bike.surface === 'asphalt' || bike.surface === 'curb' ? 0.55 : 1.05,
           bike.surface === 'asphalt' || bike.surface === 'curb' ? 0xf97316 : 0xb7a994,
           0.34,
+        );
+      }
+    } else if (!bike.crashed && bike.speed > 14 && (bike.onRainPatch || this.weatherState.rainIntensity > 0.45)) {
+      const rate = bike.onRainPatch ? 34 : 10;
+      if (Math.random() < dt * rate) {
+        const fwdX = Math.sin(bike.heading);
+        const fwdZ = Math.cos(bike.heading);
+        this.spawnParticle(
+          bike.x - fwdX * 0.95 + (Math.random() - 0.5) * 0.35,
+          0.18,
+          bike.z - fwdZ * 0.95 + (Math.random() - 0.5) * 0.35,
+          -fwdX * (bike.speed * 0.16) + (Math.random() - 0.5) * 1.4,
+          1.4 + Math.random() * 1.9,
+          -fwdZ * (bike.speed * 0.16) + (Math.random() - 0.5) * 1.4,
+          bike.onRainPatch ? 0.88 : 0.52,
+          0xbae6fd,
+          0.36,
         );
       }
     } else if (bike.speed > 18 && (bike.surface === 'gravel' || Math.abs(bike.leanAngle) > 0.68)) {
@@ -688,6 +821,76 @@ export class MotoGPScene {
       this.syncVisualRig(bike, dt);
     }
     this.trackWorld.updateCrowd(this.titlePanTime, gantrySample.x, gantrySample.z);
+    this.trackWorld.updateMarshals(this.titlePanTime, false);
+  }
+
+  private updatePreRaceCamera(progress: number): void {
+    // 2-Phase Cinematic Pre-Race Sequence:
+    // Phase 1 (0..0.46): Trackside Turn 1 & Pit Wall glide past animated flag-waving Marshals + Grandstands
+    // Phase 2 (0.46..1.0): Sweeping front-grid flyover down past P1-P3 settling behind player's bike
+    const t = Math.max(0, Math.min(1, progress));
+    const localBike = this.bikes.find((b) => b.id === this.localBikeId) ?? this.bikes[0];
+    const poleBike = this.bikes[0] ?? localBike;
+    const gantrySample = sampleTrackAtS(this.circuit, START_LINE_S);
+    const t1Sample = sampleTrackAtS(this.circuit, START_LINE_S + 20);
+
+    if (!localBike) return;
+
+    const fwdX = Math.sin(localBike.heading);
+    const fwdZ = Math.cos(localBike.heading);
+
+    // Anchor trackside camera beside the waving pit-wall marshal overlooking the 22-bike grid
+    const phase1StartX = t1Sample.x - t1Sample.nx * 9.8;
+    const phase1StartY = 3.6;
+    const phase1StartZ = t1Sample.z - t1Sample.nz * 9.8;
+
+    // Anchor front-row grid & green-flag marshal vista
+    const midX = gantrySample.x - gantrySample.nx * 7.8 - gantrySample.tx * 8.5;
+    const midY = 2.45;
+    const midZ = gantrySample.z - gantrySample.nz * 7.8 - gantrySample.tz * 8.5;
+
+    // Anchor player chase start
+    const endX = localBike.x - fwdX * 4.2;
+    const endY = 1.82;
+    const endZ = localBike.z - fwdZ * 4.2;
+
+    this.camera.up.set(0, 1, 0);
+
+    if (t < 0.46) {
+      const u = t / 0.46;
+      const su = u * u * (3 - 2 * u);
+      this.camera.position.set(
+        phase1StartX + (midX - phase1StartX) * su,
+        phase1StartY + (midY - phase1StartY) * su,
+        phase1StartZ + (midZ - phase1StartZ) * su,
+      );
+      const lookAx = gantrySample.x - gantrySample.tx * 9;
+      const lookAz = gantrySample.z - gantrySample.tz * 9;
+      const lookBx = (poleBike ? poleBike.x : gantrySample.x) - gantrySample.tx * 5;
+      const lookBz = (poleBike ? poleBike.z : gantrySample.z) - gantrySample.tz * 5;
+      this.camera.lookAt(
+        lookAx + (lookBx - lookAx) * su,
+        1.45 - su * 0.25,
+        lookAz + (lookBz - lookAz) * su,
+      );
+    } else {
+      const u = (t - 0.46) / 0.54;
+      const su = u * u * (3 - 2 * u);
+      this.camera.position.set(
+        midX + (endX - midX) * su,
+        midY + (endY - midY) * su,
+        midZ + (endZ - midZ) * su,
+      );
+      const lookStartX = (poleBike ? poleBike.x : gantrySample.x) - gantrySample.tx * 5;
+      const lookStartZ = (poleBike ? poleBike.z : gantrySample.z) - gantrySample.tz * 5;
+      const lookEndX = localBike.x + fwdX * 14;
+      const lookEndZ = localBike.z + fwdZ * 14;
+      this.camera.lookAt(
+        lookStartX + (lookEndX - lookStartX) * su,
+        1.2 + (1.05 - 1.2) * su,
+        lookStartZ + (lookEndZ - lookStartZ) * su,
+      );
+    }
   }
 
   private stepPlaying(dt: number, now: number): void {
@@ -696,6 +899,26 @@ export class MotoGPScene {
       this.hitstopTimer -= dt;
       this.updateParticles(dt);
       this.updateCamera(dt);
+      return;
+    }
+
+    // Before-Race Trackside & Marshal Flag Scene -> Starting Grid Intro
+    if (this.preRaceTimer > 0) {
+      this.preRaceTimer = Math.max(0, this.preRaceTimer - dt);
+      this.crowdTimeSec += dt;
+      const progress = 1 - this.preRaceTimer / Math.max(0.01, this.preRaceDuration);
+      this.updatePreRaceCamera(progress);
+      for (const bike of this.bikes) {
+        this.syncVisualRig(bike, dt, 0, true);
+      }
+      const localBike = this.bikes.find((b) => b.id === this.localBikeId) ?? this.bikes[0];
+      this.trackWorld.updateCrowd(
+        this.crowdTimeSec,
+        localBike ? localBike.x : 0,
+        localBike ? localBike.z : 0,
+      );
+      this.trackWorld.updateMarshals(this.crowdTimeSec, true);
+      this.emitHudSnapshot(now, -1, false, false);
       return;
     }
 
@@ -734,12 +957,25 @@ export class MotoGPScene {
       }
     }
 
-    const localInput = this.readLocalInput();
+    const localInput = this.readLocalInput(dt);
     let localWrongWay = false;
     const localBike = this.bikes.find((b) => b.id === this.localBikeId) ?? this.bikes[0];
 
     if (canMove) {
       updateSlipstreamStatus(this.bikes, this.circuit);
+      const weatherEvt = stepDynamicWeather(
+        this.weatherState,
+        this.circuit,
+        this.raceElapsedMs,
+        dt,
+        this.sessionType === 'qualifying',
+      );
+      if (weatherEvt.changedPhase) {
+        this.audio.playWeatherCue(this.weatherState.phase === 'rain');
+      }
+      if (weatherEvt.spawnedPatches) {
+        this.trackWorld.syncRainPatches(this.weatherState.patches, this.weatherState.rainIntensity);
+      }
     }
 
     for (const bike of this.bikes) {
@@ -765,7 +1001,9 @@ export class MotoGPScene {
         continue;
       }
 
-      const input = bike.isPlayer ? localInput : computeAiInput(bike, this.circuit, this.bikes);
+      const input = bike.isPlayer
+        ? localInput
+        : computeAiInput(bike, this.circuit, this.bikes, this.weatherState.patches);
       const res = stepBikePhysics(
         bike,
         input,
@@ -775,6 +1013,8 @@ export class MotoGPScene {
         this.totalLaps,
         canMove,
         this.trackWorld.colliders,
+        this.weatherState.patches,
+        this.weatherState.rainIntensity,
       );
 
       if (res.solidImpact) {
@@ -799,8 +1039,8 @@ export class MotoGPScene {
 
       if (res.justCrashed) {
         if (bike.isPlayer) {
+          // Camera shake + audio impact ONLY — never freeze/slow the rest of the grid
           this.trauma = 0.85;
-          this.hitstopTimer = 0.04;
           this.audio.playImpact(1.0);
         }
         for (let k = 0; k < 14; k++) {
@@ -820,9 +1060,6 @@ export class MotoGPScene {
 
       if (bike.isPlayer) {
         localWrongWay = res.wrongWay;
-        if (res.gearChanged && canMove) {
-          this.audio.playGearShift();
-        }
         if (res.completedLap) {
           this.audio.playLapComplete(res.finishedRace);
         }
@@ -830,10 +1067,10 @@ export class MotoGPScene {
           this.triggerRaceFinish();
         }
       }
-      this.syncVisualRig(bike, dt);
+      this.syncVisualRig(bike, dt, input.brake, !canMove);
     }
 
-    // Bike-to-bike collisions (with high-speed crash knockdowns)
+    // Bike-to-bike collisions (impact only the riders involved, zero global simulation freeze)
     const impacts = resolveBikeCollisions(this.bikes);
     if (impacts.length > 0) {
       for (const imp of impacts) {
@@ -841,7 +1078,6 @@ export class MotoGPScene {
         const localCrashed = imp.crashedIds.includes(this.localBikeId);
         if (localHit || localCrashed) {
           this.trauma = Math.min(1, this.trauma + (localCrashed ? 0.85 : 0.35 + imp.intensity * 0.45));
-          this.hitstopTimer = localCrashed ? 0.045 : 0.035;
           this.audio.playImpact(localCrashed ? 1.0 : imp.intensity);
         }
         const particleCount = imp.crashedIds.length > 0 ? 14 : 10;
@@ -870,6 +1106,7 @@ export class MotoGPScene {
         localBike.isBoosting,
         true,
         localBike.bikeClass,
+        localBike.gear,
       );
       this.audio.updateSurfaceSfx(localBike.surface, localBike.speed, canMove);
       if (localBike.isBoosting && !this.wasBoosting && canMove) {
@@ -889,8 +1126,10 @@ export class MotoGPScene {
       localBike ? localBike.x : 0,
       localBike ? localBike.z : 0,
     );
+    this.trackWorld.updateMarshals(this.crowdTimeSec, !canMove);
     this.updateParticles(dt);
     this.updateCamera(dt);
+    this.updateWeatherVisuals(dt);
 
     // Emit network telemetry at ~20Hz when in LAN mode
     if (this.raceMode === 'lan' && localBike && this.callbacks.onLocalTelemetry && now - this.lastNetEmit >= 50) {
@@ -918,6 +1157,56 @@ export class MotoGPScene {
     this.emitHudSnapshot(now, countdownStage, localWrongWay, false);
   }
 
+  private updateWeatherVisuals(dt: number): void {
+    const cloud = this.weatherState.cloudCover;
+    const rain = this.weatherState.rainIntensity;
+
+    // Smoothly darken clear sunlit sky into storm clouds & rain atmosphere
+    if (cloud > 0.01) {
+      const skyUniforms = this.sky.material.uniforms;
+      const baseSun = this.baseSkyMood === 'overcast' ? 1.65 : this.baseSkyMood === 'sunset' ? 2.1 : 2.2;
+      const baseHemi = this.baseSkyMood === 'overcast' ? 0.85 : this.baseSkyMood === 'sunset' ? 0.65 : 0.72;
+      skyUniforms['turbidity'].value = 4.5 + cloud * 5.5;
+      skyUniforms['rayleigh'].value = Math.max(0.55, 1.4 - cloud * 0.8);
+      this.sunLight.intensity = baseSun * (1 - cloud * 0.42);
+      this.hemiLight.intensity = baseHemi * (1 - cloud * 0.15);
+
+      const bgColor = this.scene.background as THREE.Color;
+      const clearBg = this.baseSkyMood === 'sunset' ? 0xe6b89c : this.baseSkyMood === 'overcast' ? 0xbcc9d8 : 0xcfe2f3;
+      const stormBg = 0x7b8da3;
+      bgColor.setHex(clearBg).lerp(_color.setHex(stormBg), Math.min(1, cloud * 0.88));
+      if (this.scene.fog instanceof THREE.FogExp2) {
+        this.scene.fog.color.copy(bgColor);
+        this.scene.fog.density = 0.0013 + cloud * 0.0008 + rain * 0.0006;
+      }
+    }
+
+    if (rain > 0.08) {
+      this.rainLines.visible = true;
+      this.rainLines.position.set(this.camera.position.x, 0, this.camera.position.z);
+      const posAttr = this.rainLines.geometry.getAttribute('position') as THREE.BufferAttribute;
+      const arr = this.rainPositions;
+      const fallSpeed = 24 + rain * 14;
+      for (let i = 0; i < this.rainCount; i++) {
+        const base = i * 6;
+        let ry = arr[base + 1] - fallSpeed * dt;
+        let rx = arr[base] - 2.4 * dt;
+        if (ry < 0.2) {
+          ry += 20;
+          rx = (Math.random() - 0.5) * 44;
+        }
+        arr[base] = rx;
+        arr[base + 1] = ry;
+        arr[base + 3] = rx - 0.18;
+        arr[base + 4] = ry - 1.15;
+      }
+      posAttr.needsUpdate = true;
+      (this.rainLines.material as THREE.LineBasicMaterial).opacity = Math.min(0.62, rain * 0.65);
+    } else {
+      this.rainLines.visible = false;
+    }
+  }
+
   private emitHudSnapshot(
     now: number,
     countdownStage: number,
@@ -932,6 +1221,9 @@ export class MotoGPScene {
     const sortedStandings = [...this.bikes].sort((a, b) => a.rank - b.rank);
     this.callbacks.onHudUpdate({
       sessionType: this.sessionType,
+      preRaceActive: this.preRaceTimer > 0,
+      circuitName: this.circuit.name,
+      localLiveryId: localBike.livery.id,
       speedKmh: Math.round(localBike.speed * 3.6),
       gear: localBike.gear,
       rpmRatio: Math.min(1, Math.max(0, (localBike.rpm - 3500) / (spec.maxRpm - 3500))),
@@ -944,17 +1236,35 @@ export class MotoGPScene {
       raceTimeMs: Math.round(this.raceElapsedMs),
       currentLapMs: Math.round(Math.max(0, this.raceElapsedMs - localBike.currentLapStartMs)),
       bestLapMs: localBike.bestLapMs ? Math.round(localBike.bestLapMs) : null,
-      countdownStage: this.countdownTimer > 0 ? countdownStage : this.raceElapsedMs < 1100 ? 0 : -1,
+      countdownStage:
+        this.preRaceTimer > 0
+          ? -1
+          : this.countdownTimer > 0
+          ? countdownStage
+          : this.raceElapsedMs < 1100
+          ? 0
+          : -1,
       surface: localBike.surface,
       wrongWay: localWrongWay,
       crashed: localBike.crashed,
       crashRecoverSec: Math.max(0, Number(localBike.crashTimer.toFixed(1))),
       bikeClass: localBike.bikeClass,
+      weatherPhase: this.weatherState.phase,
+      rainIntensity: Number(this.weatherState.rainIntensity.toFixed(2)),
+      onRainPatch: Boolean(localBike.onRainPatch),
+      rainPatches: this.weatherState.patches.map((p) => ({
+        id: p.id,
+        x: p.x,
+        z: p.z,
+        radius: p.radiusS,
+      })),
       leaderboard: sortedStandings.map((b) => ({
         id: b.id,
         rank: b.rank,
         name: b.name,
         color: b.livery.primaryHex,
+        liveryId: b.livery.id,
+        nationality: b.livery.nationality,
         isPlayer: b.isPlayer,
         crashed: b.crashed,
       })),
@@ -968,11 +1278,107 @@ export class MotoGPScene {
     });
   }
 
+  private setupPodiumCeremony(sorted: BikeState[]): void {
+    this.clearPodiumStage();
+    if (this.sessionType !== 'race' || sorted.length === 0) return;
+
+    const winners: PodiumWinnerSlot[] = [];
+    for (let i = 0; i < Math.min(3, sorted.length); i++) {
+      winners.push({
+        rank: (i + 1) as 1 | 2 | 3,
+        name: sorted[i].name,
+        livery: sorted[i].livery,
+      });
+    }
+
+    const bikeClass = sorted[0].bikeClass;
+    const stage = createPodiumStage(
+      winners,
+      this.textures.radialShadowMap,
+      this.isSoftwareGl,
+      bikeClass,
+    );
+
+    const anchor = sampleTrackAtS(this.circuit, START_LINE_S + 45);
+    stage.group.position.set(anchor.x, 0, anchor.z);
+    // Face the podium toward the approaching main straight (-Z / opposite tangent)
+    stage.group.rotation.y = Math.atan2(-anchor.tx, -anchor.tz);
+    this.scene.add(stage.group);
+
+    this.podiumStage = stage;
+    this.podiumOrigin.set(anchor.x, 0, anchor.z);
+    this.podiumTimeSec = 0;
+
+    // Hide race bikes on the track so the Parc Ferme podium bikes shine cleanly
+    for (const rig of this.bikeRigs.values()) {
+      rig.root.visible = false;
+    }
+
+    // Immediate celebratory confetti burst
+    const confettiColors = [0xfacc15, 0xef4444, 0x38bdf8, 0x22c55e, 0xf8fafc];
+    for (let i = 0; i < 36; i++) {
+      this.spawnParticle(
+        anchor.x + (Math.random() - 0.5) * 6,
+        2.5 + Math.random() * 2.2,
+        anchor.z + (Math.random() - 0.5) * 4,
+        (Math.random() - 0.5) * 4,
+        2.0 + Math.random() * 3.5,
+        (Math.random() - 0.5) * 4,
+        0.55,
+        confettiColors[i % confettiColors.length],
+        1.4,
+      );
+    }
+  }
+
+  private stepPodiumCeremony(dt: number): void {
+    if (!this.podiumStage) return;
+    this.podiumTimeSec += dt;
+    animatePodiumCeremony(this.podiumStage, this.podiumTimeSec);
+
+    // Gentle celebratory confetti stream
+    if (Math.random() < dt * 24) {
+      const confettiColors = [0xfacc15, 0xef4444, 0x38bdf8, 0x22c55e, 0xf8fafc];
+      this.spawnParticle(
+        this.podiumOrigin.x + (Math.random() - 0.5) * 5.2,
+        3.6 + Math.random() * 1.4,
+        this.podiumOrigin.z + (Math.random() - 0.5) * 3.5,
+        (Math.random() - 0.5) * 2.4,
+        1.4 + Math.random() * 1.6,
+        (Math.random() - 0.5) * 2.4,
+        0.48,
+        confettiColors[Math.floor(Math.random() * confettiColors.length)],
+        1.3,
+      );
+    }
+    this.updateParticles(dt);
+    this.trackWorld.updateCrowd(this.podiumTimeSec, this.podiumOrigin.x, this.podiumOrigin.z);
+    this.trackWorld.updateMarshals(this.podiumTimeSec, false);
+
+    // Orbital broadcast camera in front of the podium stage (wide enough to clear bottom overlay)
+    const orbit = Math.sin(this.podiumTimeSec * 0.35) * 0.36;
+    const anchor = sampleTrackAtS(this.circuit, START_LINE_S + 45);
+    const frontX = -anchor.tx;
+    const frontZ = -anchor.tz;
+    const rightX = -frontZ;
+    const rightZ = frontX;
+    const dist = 8.4;
+
+    this.camera.up.set(0, 1, 0);
+    this.camera.position.set(
+      this.podiumOrigin.x + frontX * dist * Math.cos(orbit) + rightX * dist * Math.sin(orbit),
+      2.65 + Math.sin(this.podiumTimeSec * 0.5) * 0.16,
+      this.podiumOrigin.z + frontZ * dist * Math.cos(orbit) + rightZ * dist * Math.sin(orbit),
+    );
+    this.camera.lookAt(this.podiumOrigin.x, 1.05, this.podiumOrigin.z);
+  }
+
   private triggerRaceFinish(): void {
     this.gameState = 'gameover';
     this.audio.silenceEngine();
     this.audio.setBgmMode('off');
     const sorted = [...this.bikes].sort((a, b) => a.rank - b.rank);
+    this.setupPodiumCeremony(sorted);
     const results: RaceResultEntry[] = sorted.map((b) => ({
       id: b.id,
       name: b.name,
@@ -985,6 +1391,29 @@ export class MotoGPScene {
       isAi: b.isAi,
     }));
     this.callbacks.onRaceFinish(results);
+  }
+
+  public previewPodium(): void {
+    this.audio.silenceEngine();
+    this.audio.setBgmMode('off');
+    updateRaceRankings(this.bikes);
+    const sorted = [...this.bikes].sort((a, b) => a.rank - b.rank);
+    const results: RaceResultEntry[] = sorted.map((b, idx) => ({
+      id: b.id,
+      name: b.name,
+      livery: b.livery,
+      rank: idx + 1,
+      finishTimeMs: 184200 + idx * 1450,
+      bestLapMs: 59400 + idx * 320,
+      topSpeedKmh: 318 - idx * 2,
+      isPlayer: b.isPlayer,
+      isAi: b.isAi,
+    }));
+    this.setupPodiumCeremony(sorted);
+    this.stepPodiumCeremony(0.4);
+    this.gameState = 'gameover';
+    this.callbacks.onRaceFinish(results);
+    this.renderer.render(this.scene, this.camera);
   }
 
   private updateCamera(dt: number): void {
@@ -1080,6 +1509,8 @@ export class MotoGPScene {
           this.stepPlaying(subDt, now);
           remaining -= subDt;
         }
+      } else if (this.gameState === 'gameover' && this.podiumStage) {
+        this.stepPodiumCeremony(Math.min(frameBudget, 0.05));
       }
 
       this.renderer.render(this.scene, this.camera);
@@ -1106,6 +1537,7 @@ export class MotoGPScene {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
+    this.renderer.render(this.scene, this.camera);
   }
 
   private handleFirstInteract = (): void => {
@@ -1118,6 +1550,10 @@ export class MotoGPScene {
     this.audio.unlock();
     this.keys.add(e.code);
     if (this.gameState === 'playing') {
+      if (this.preRaceTimer > 0 && (e.code === 'Space' || e.code === 'Enter')) {
+        this.skipPreRace();
+        return;
+      }
       if (e.code === 'Escape' || e.code === 'KeyP') {
         this.callbacks.onTogglePause?.();
       } else if (e.code === 'KeyC') {
@@ -1156,6 +1592,7 @@ export class MotoGPScene {
     window.removeEventListener('blur', this.handleBlur);
     document.removeEventListener('visibilitychange', this.handleVisibility);
     this.resizeObserver.disconnect();
+    this.clearPodiumStage();
     for (const rig of this.bikeRigs.values()) {
       rig.dispose();
     }
@@ -1163,6 +1600,8 @@ export class MotoGPScene {
     this.textures.dispose();
     this.particleMesh.geometry.dispose();
     (this.particleMesh.material as THREE.Material).dispose();
+    this.rainLines.geometry.dispose();
+    (this.rainLines.material as THREE.Material).dispose();
     this.envMap.dispose();
     this.audio.dispose();
     this.renderer.dispose();

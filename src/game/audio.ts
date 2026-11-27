@@ -1,15 +1,154 @@
-// Procedural Web Audio API engine synthesizer, BGM sequencer & motorsport SFX
+// Procedural Web Audio API engine synthesizer (Moto3 / Moto2 / MotoGP), BGM sequencer & motorsport SFX
 import type { BikeClassId, SurfaceType } from './types';
 
 export type BgmMode = 'off' | 'title' | 'race';
+
+export interface EngineAudioParams {
+  fundamentalHz: number;
+  subHarmonicHz: number;
+  overtoneHz: number;
+  filterHz: number;
+  filterQ: number;
+  primaryWave: OscillatorType;
+  subWave: OscillatorType;
+  overtoneWave: OscillatorType;
+  subGain: number;
+  overtoneGain: number;
+  masterEngineGain: number;
+}
+
+export function computeEngineAudioParams(
+  rpm: number,
+  throttle: number,
+  isBoosting: boolean,
+  bikeClass: BikeClassId = 'motogp',
+  gear = 1,
+): EngineAudioParams {
+  const safeRpm = Math.max(2200, rpm);
+  const clampedGear = Math.max(1, Math.min(6, gear));
+  // Higher gears subtly shift intake load & exhaust resonance upward
+  const gearLoadPitch = 0.93 + (clampedGear - 1) * 0.03;
+  const boostPitch = isBoosting ? 1.07 : 1.0;
+
+  if (bikeClass === 'moto3') {
+    // 250cc Single-Cylinder: crisp thumper pulse + high-rev valve-train zing
+    const fundamentalHz = Math.max(48, (safeRpm / 60) * 1.62 * gearLoadPitch * boostPitch);
+    return {
+      fundamentalHz,
+      subHarmonicHz: fundamentalHz * 0.5,
+      overtoneHz: fundamentalHz * 2.0,
+      filterHz: 380 + (safeRpm / 14000) * 2800 + (isBoosting ? 750 : 0),
+      filterQ: 4.4,
+      primaryWave: 'sawtooth',
+      subWave: 'square',
+      overtoneWave: 'triangle',
+      subGain: 0.42,
+      overtoneGain: 0.36,
+      masterEngineGain: 0.085 + throttle * 0.125 + (isBoosting ? 0.045 : 0),
+    };
+  }
+
+  if (bikeClass === 'moto2') {
+    // 765cc Inline-3 Triple: unmistakable 1.5x fifth harmonic + silky intake howl
+    const fundamentalHz = Math.max(54, (safeRpm / 60) * 1.92 * gearLoadPitch * boostPitch);
+    return {
+      fundamentalHz,
+      subHarmonicHz: fundamentalHz * 1.5,
+      overtoneHz: fundamentalHz * 3.0,
+      filterHz: 340 + (safeRpm / 15000) * 2600 + (isBoosting ? 800 : 0),
+      filterQ: 3.1,
+      primaryWave: 'sawtooth',
+      subWave: 'triangle',
+      overtoneWave: 'sawtooth',
+      subGain: 0.48,
+      overtoneGain: 0.28,
+      masterEngineGain: 0.085 + throttle * 0.13 + (isBoosting ? 0.05 : 0),
+    };
+  }
+
+  // MotoGP 1000cc Big-Bang V4: aggressive low-end firing pulse + screaming top-end V4 snarl
+  const fundamentalHz = Math.max(52, (safeRpm / 60) * 1.78 * gearLoadPitch * boostPitch);
+  return {
+    fundamentalHz,
+    subHarmonicHz: fundamentalHz * 0.75,
+    overtoneHz: fundamentalHz * 2.5,
+    filterHz: 310 + (safeRpm / 16500) * 3200 + (isBoosting ? 950 : 0),
+    filterQ: 2.5,
+    primaryWave: 'sawtooth',
+    subWave: 'square',
+    overtoneWave: 'sawtooth',
+    subGain: 0.52,
+    overtoneGain: 0.34,
+    masterEngineGain: 0.092 + throttle * 0.14 + (isBoosting ? 0.06 : 0),
+  };
+}
+
+// Official MotoGP Broadcast Championship Menu Anthem (118 BPM, 64-step 4-bar D minor fanfare)
+// Combines soaring French Horn / Synth Brass lead melody, driving string ostinato, and timpani/snare march
+export interface AnthemStepSpec {
+  bassHz: number;
+  leadHz: number | null;
+  ostinatoHz: number;
+  kick: boolean;
+  snare: boolean;
+  crashCymbal: boolean;
+}
+
+const ANTHEM_CHORD_BASS = [
+  73.42, // Bar 0: Dm (D2)
+  58.27, // Bar 1: Bb (Bb1)
+  65.41, // Bar 2: C  (C2)
+  55.0, // Bar 3: A7 (A1)
+];
+
+// Dramatic heroic MotoGP-style championship melody (D4, A4, F4, G4, A4, Bb4, C5, D5...)
+const ANTHEM_LEAD_64: Array<number | null> = [
+  // Bar 0 (Dm)
+  293.66, null, null, null, 440.0, null, 392.0, null, 349.23, null, null, null, 329.63, null, 293.66, null,
+  // Bar 1 (Bb)
+  233.08, null, null, null, 349.23, null, 392.0, null, 440.0, null, null, null, 466.16, null, 440.0, null,
+  // Bar 2 (C)
+  392.0, null, null, null, 523.25, null, 493.88, null, 440.0, null, null, null, 392.0, null, 349.23, null,
+  // Bar 3 (A -> Dm turnaround)
+  329.63, null, 349.23, null, 392.0, null, 440.0, null, 523.25, null, 493.88, null, 440.0, null, 329.63, null,
+];
+
+const ANTHEM_OSTINATO_BARS: number[][] = [
+  [293.66, 349.23, 440.0, 349.23], // Dm
+  [233.08, 293.66, 349.23, 293.66], // Bb
+  [261.63, 329.63, 392.0, 329.63], // C
+  [220.0, 277.18, 329.63, 277.18], // A major dominant tension
+];
+
+export function getTitleAnthemStepSpec(step: number): AnthemStepSpec {
+  const s = ((step % 64) + 64) % 64;
+  const bar = Math.floor(s / 16);
+  const beatStep = s % 16;
+  const ostBar = ANTHEM_OSTINATO_BARS[bar % ANTHEM_OSTINATO_BARS.length];
+
+  return {
+    bassHz: ANTHEM_CHORD_BASS[bar % ANTHEM_CHORD_BASS.length],
+    leadHz: ANTHEM_LEAD_64[s],
+    ostinatoHz: ostBar[s % ostBar.length],
+    kick: beatStep === 0 || beatStep === 6 || beatStep === 8 || beatStep === 14,
+    snare: beatStep === 4 || beatStep === 12 || (bar === 3 && beatStep >= 13),
+    crashCymbal: s === 0 || s === 32,
+  };
+}
 
 export class MotoAudioEngine {
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
   private engineGain: GainNode | null = null;
   private oscPrimary: OscillatorNode | null = null;
-  private oscHarmonic: OscillatorNode | null = null;
+  private oscSub: OscillatorNode | null = null;
+  private oscOvertone: OscillatorNode | null = null;
+  private subGainNode: GainNode | null = null;
+  private overtoneGainNode: GainNode | null = null;
   private exhaustFilter: BiquadFilterNode | null = null;
+  private currentEngineClass: BikeClassId | null = null;
+  private lastGear = 1;
+  private gearDipUntil = 0;
 
   // Surface noise (gravel crunch & curb rumble)
   private surfaceGain: GainNode | null = null;
@@ -51,7 +190,7 @@ export class MotoAudioEngine {
   public setBgmEnabled(enabled: boolean): void {
     this.bgmEnabled = enabled;
     if (this.bgmGain && this.ctx) {
-      const target = enabled && this.bgmMode !== 'off' ? (this.bgmMode === 'race' ? 0.24 : 0.2) : 0;
+      const target = enabled && this.bgmMode !== 'off' ? (this.bgmMode === 'race' ? 0.24 : 0.26) : 0;
       this.bgmGain.gain.setTargetAtTime(target, this.ctx.currentTime, 0.08);
     }
   }
@@ -64,8 +203,9 @@ export class MotoAudioEngine {
   public setBgmMode(mode: BgmMode): void {
     if (this.bgmMode === mode) return;
     this.bgmMode = mode;
+    this.bgmStep = 0;
     if (this.bgmGain && this.ctx) {
-      const target = this.bgmEnabled && mode !== 'off' ? (mode === 'race' ? 0.24 : 0.2) : 0;
+      const target = this.bgmEnabled && mode !== 'off' ? (mode === 'race' ? 0.24 : 0.26) : 0;
       this.bgmGain.gain.setTargetAtTime(target, this.ctx.currentTime, 0.12);
     }
     if (this.ctx) {
@@ -93,11 +233,11 @@ export class MotoAudioEngine {
       master.connect(ctx.destination);
       this.masterGain = master;
 
-      // Engine synth chain
+      // 3-Oscillator Class-Specific Engine Synth Chain
       const filter = ctx.createBiquadFilter();
       filter.type = 'lowpass';
       filter.frequency.value = 520;
-      filter.Q.value = 3.0;
+      filter.Q.value = 2.8;
 
       const engineGain = ctx.createGain();
       engineGain.gain.value = 0;
@@ -106,24 +246,41 @@ export class MotoAudioEngine {
       osc1.type = 'sawtooth';
       osc1.frequency.value = 85;
 
-      const osc2 = ctx.createOscillator();
-      osc2.type = 'triangle';
-      osc2.frequency.value = 170;
+      const oscSub = ctx.createOscillator();
+      oscSub.type = 'square';
+      oscSub.frequency.value = 64;
+
+      const subGain = ctx.createGain();
+      subGain.gain.value = 0.45;
+
+      const oscOvertone = ctx.createOscillator();
+      oscOvertone.type = 'sawtooth';
+      oscOvertone.frequency.value = 212;
+
+      const overtoneGain = ctx.createGain();
+      overtoneGain.gain.value = 0.32;
 
       osc1.connect(filter);
-      osc2.connect(filter);
+      oscSub.connect(subGain);
+      subGain.connect(filter);
+      oscOvertone.connect(overtoneGain);
+      overtoneGain.connect(filter);
       filter.connect(engineGain);
       engineGain.connect(master);
 
       osc1.start();
-      osc2.start();
+      oscSub.start();
+      oscOvertone.start();
 
       this.oscPrimary = osc1;
-      this.oscHarmonic = osc2;
+      this.oscSub = oscSub;
+      this.oscOvertone = oscOvertone;
+      this.subGainNode = subGain;
+      this.overtoneGainNode = overtoneGain;
       this.exhaustFilter = filter;
       this.engineGain = engineGain;
 
-      // Reusable 1.5s white noise buffer for gravel / curb / boost whoosh / hi-hats
+      // Reusable 1.5s white noise buffer for gravel / curb / boost whoosh / hi-hats / snares
       const bufLen = Math.floor(ctx.sampleRate * 1.5);
       const noiseBuf = ctx.createBuffer(1, bufLen, ctx.sampleRate);
       const data = noiseBuf.getChannelData(0);
@@ -157,7 +314,7 @@ export class MotoAudioEngine {
       // BGM bus
       const bgmGain = ctx.createGain();
       bgmGain.gain.value =
-        this.bgmEnabled && this.bgmMode !== 'off' ? (this.bgmMode === 'race' ? 0.24 : 0.2) : 0;
+        this.bgmEnabled && this.bgmMode !== 'off' ? (this.bgmMode === 'race' ? 0.24 : 0.26) : 0;
       bgmGain.connect(master);
       this.bgmGain = bgmGain;
 
@@ -179,14 +336,16 @@ export class MotoAudioEngine {
     }
     if (this.ctx.state !== 'running') return;
 
-    const bpm = this.bgmMode === 'race' ? 138 : 108;
+    const isRace = this.bgmMode === 'race';
+    const bpm = isRace ? 138 : 118;
     const stepDur = 60 / bpm / 4; // 16th note duration
     const lookahead = 0.16;
+    const loopSteps = isRace ? 32 : 64;
 
     while (this.nextStepTime < this.ctx.currentTime + lookahead) {
       this.triggerBgmStep(this.bgmStep, this.nextStepTime, stepDur);
       this.nextStepTime += stepDur;
-      this.bgmStep = (this.bgmStep + 1) % 32;
+      this.bgmStep = (this.bgmStep + 1) % loopSteps;
     }
   }
 
@@ -194,13 +353,11 @@ export class MotoAudioEngine {
     if (!this.ctx || !this.bgmGain) return;
     const isRace = this.bgmMode === 'race';
 
-    // Bass progression (D minor -> Bb -> C -> A)
-    const bassRoots = [73.42, 73.42, 58.27, 65.41]; // D2, D2, Bb1, C2
-    const bar = Math.floor(step / 8);
-    const rootFreq = bassRoots[bar % bassRoots.length];
-
     if (isRace) {
-      // Punchy 4-on-the-floor kick on steps 0, 4, 8, 12, ...
+      const bassRoots = [73.42, 73.42, 58.27, 65.41]; // D2, D2, Bb1, C2
+      const bar = Math.floor(step / 8);
+      const rootFreq = bassRoots[bar % bassRoots.length];
+
       if (step % 4 === 0) {
         const kick = this.ctx.createOscillator();
         const kGain = this.ctx.createGain();
@@ -215,7 +372,6 @@ export class MotoAudioEngine {
         kick.stop(t + 0.14);
       }
 
-      // Driving off-beat hi-hat
       if (step % 2 === 1 && this.noiseBuffer) {
         const hat = this.ctx.createBufferSource();
         hat.buffer = this.noiseBuffer;
@@ -232,7 +388,6 @@ export class MotoAudioEngine {
         hat.stop(t + 0.05);
       }
 
-      // Driving 8th-note synthwave bassline
       if (step % 2 === 0) {
         const bass = this.ctx.createOscillator();
         const bFilter = this.ctx.createBiquadFilter();
@@ -251,7 +406,6 @@ export class MotoAudioEngine {
         bass.stop(t + stepDur * 1.8);
       }
 
-      // Adrenaline motorsport arpeggio
       const arpPattern = [293.66, 349.23, 440.0, 523.25, 440.0, 349.23, 392.0, 440.0];
       const arpFreq = arpPattern[step % arpPattern.length] * (bar === 2 ? 0.89 : 1);
       if (step % 2 === 0 || step % 8 === 7) {
@@ -266,36 +420,127 @@ export class MotoAudioEngine {
         lead.start(t);
         lead.stop(t + stepDur * 1.6);
       }
-    } else {
-      // Chill Paddock Title groove (quarter bass pulse + soft synth bell arpeggio)
-      if (step % 4 === 0) {
-        const bass = this.ctx.createOscillator();
-        const bGain = this.ctx.createGain();
-        bass.type = 'sine';
-        bass.frequency.setValueAtTime(rootFreq, t);
-        bGain.gain.setValueAtTime(0.24, t);
-        bGain.gain.exponentialRampToValueAtTime(0.001, t + stepDur * 3.2);
-        bass.connect(bGain);
-        bGain.connect(this.bgmGain);
-        bass.start(t);
-        bass.stop(t + stepDur * 3.4);
-      }
-      if (step % 4 === 2) {
-        const padNotes = [293.66, 349.23, 440.0, 523.25];
-        const note = padNotes[Math.floor(step / 4) % padNotes.length];
-        if (Number.isFinite(note)) {
-          const pad = this.ctx.createOscillator();
-          const pGain = this.ctx.createGain();
-          pad.type = 'triangle';
-          pad.frequency.setValueAtTime(note, t);
-          pGain.gain.setValueAtTime(0.09, t);
-          pGain.gain.exponentialRampToValueAtTime(0.001, t + stepDur * 3.5);
-          pad.connect(pGain);
-          pGain.connect(this.bgmGain);
-          pad.start(t);
-          pad.stop(t + stepDur * 3.6);
-        }
-      }
+      return;
+    }
+
+    // Authentic MotoGP World Feed Orchestral Broadcast Menu Anthem
+    const spec = getTitleAnthemStepSpec(step);
+
+    // 1. Timpani & Taiko march kick
+    if (spec.kick) {
+      const timp = this.ctx.createOscillator();
+      const tGain = this.ctx.createGain();
+      timp.type = 'sine';
+      timp.frequency.setValueAtTime(102, t);
+      timp.frequency.exponentialRampToValueAtTime(44, t + 0.16);
+      tGain.gain.setValueAtTime(0.36, t);
+      tGain.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
+      timp.connect(tGain);
+      tGain.connect(this.bgmGain);
+      timp.start(t);
+      timp.stop(t + 0.24);
+    }
+
+    // 2. Orchestral Snare Drum Hit
+    if (spec.snare && this.noiseBuffer) {
+      const sn = this.ctx.createBufferSource();
+      sn.buffer = this.noiseBuffer;
+      const bp = this.ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime(1950, t);
+      bp.Q.value = 1.1;
+      const sGain = this.ctx.createGain();
+      sGain.gain.setValueAtTime(0.14, t);
+      sGain.gain.exponentialRampToValueAtTime(0.001, t + 0.11);
+      sn.connect(bp);
+      bp.connect(sGain);
+      sGain.connect(this.bgmGain);
+      sn.start(t);
+      sn.stop(t + 0.12);
+    }
+
+    // 3. Cymbal Swell on section downbeats
+    if (spec.crashCymbal && this.noiseBuffer) {
+      const cym = this.ctx.createBufferSource();
+      cym.buffer = this.noiseBuffer;
+      const hp = this.ctx.createBiquadFilter();
+      hp.type = 'highpass';
+      hp.frequency.setValueAtTime(5200, t);
+      const cGain = this.ctx.createGain();
+      cGain.gain.setValueAtTime(0.09, t);
+      cGain.gain.exponentialRampToValueAtTime(0.001, t + 0.72);
+      cym.connect(hp);
+      hp.connect(cGain);
+      cGain.connect(this.bgmGain);
+      cym.start(t);
+      cym.stop(t + 0.74);
+    }
+
+    // 4. Sustained Low Brass Bass Foundation on bar starts
+    if (step % 16 === 0 || step % 16 === 8) {
+      const bass = this.ctx.createOscillator();
+      const bFilt = this.ctx.createBiquadFilter();
+      const bGain = this.ctx.createGain();
+      bass.type = 'sawtooth';
+      bass.frequency.setValueAtTime(spec.bassHz, t);
+      bFilt.type = 'lowpass';
+      bFilt.frequency.setValueAtTime(340, t);
+      bGain.gain.setValueAtTime(0.24, t);
+      bGain.gain.exponentialRampToValueAtTime(0.001, t + stepDur * 7.6);
+      bass.connect(bFilt);
+      bFilt.connect(bGain);
+      bGain.connect(this.bgmGain);
+      bass.start(t);
+      bass.stop(t + stepDur * 7.8);
+    }
+
+    // 5. Driving 16th-Note String Ostinato
+    const ost = this.ctx.createOscillator();
+    const oFilt = this.ctx.createBiquadFilter();
+    const oGain = this.ctx.createGain();
+    ost.type = 'sawtooth';
+    ost.frequency.setValueAtTime(spec.ostinatoHz, t);
+    oFilt.type = 'bandpass';
+    oFilt.frequency.setValueAtTime(1100, t);
+    oFilt.Q.value = 0.85;
+    oGain.gain.setValueAtTime(step % 2 === 0 ? 0.085 : 0.055, t);
+    oGain.gain.exponentialRampToValueAtTime(0.001, t + stepDur * 0.92);
+    ost.connect(oFilt);
+    oFilt.connect(oGain);
+    oGain.connect(this.bgmGain);
+    ost.start(t);
+    ost.stop(t + stepDur * 0.96);
+
+    // 6. Dual-Voice French Horn / Brass Anthem Lead
+    if (spec.leadHz !== null) {
+      const hornA = this.ctx.createOscillator();
+      const hornB = this.ctx.createOscillator();
+      const hFilt = this.ctx.createBiquadFilter();
+      const hGain = this.ctx.createGain();
+
+      hornA.type = 'sawtooth';
+      hornB.type = 'triangle';
+      hornA.frequency.setValueAtTime(spec.leadHz, t);
+      hornB.frequency.setValueAtTime(spec.leadHz * 0.5, t);
+
+      hFilt.type = 'lowpass';
+      hFilt.frequency.setValueAtTime(950, t);
+      hFilt.frequency.linearRampToValueAtTime(2200, t + 0.09);
+      hFilt.frequency.exponentialRampToValueAtTime(1250, t + stepDur * 3.2);
+
+      hGain.gain.setValueAtTime(0.01, t);
+      hGain.gain.linearRampToValueAtTime(0.18, t + 0.045);
+      hGain.gain.exponentialRampToValueAtTime(0.001, t + stepDur * 3.6);
+
+      hornA.connect(hFilt);
+      hornB.connect(hFilt);
+      hFilt.connect(hGain);
+      hGain.connect(this.bgmGain);
+
+      hornA.start(t);
+      hornB.start(t);
+      hornA.stop(t + stepDur * 3.7);
+      hornB.stop(t + stepDur * 3.7);
     }
   }
 
@@ -305,8 +550,19 @@ export class MotoAudioEngine {
     isBoosting: boolean,
     active: boolean,
     bikeClass: BikeClassId = 'motogp',
+    gear = 1,
   ): void {
-    if (!this.initialized || !this.ctx || !this.oscPrimary || !this.oscHarmonic || !this.exhaustFilter || !this.engineGain) {
+    if (
+      !this.initialized ||
+      !this.ctx ||
+      !this.oscPrimary ||
+      !this.oscSub ||
+      !this.oscOvertone ||
+      !this.subGainNode ||
+      !this.overtoneGainNode ||
+      !this.exhaustFilter ||
+      !this.engineGain
+    ) {
       return;
     }
     const t = this.ctx.currentTime;
@@ -315,16 +571,33 @@ export class MotoAudioEngine {
       return;
     }
 
-    const classPitch = bikeClass === 'moto3' ? 2.45 : bikeClass === 'moto2' ? 1.85 : 2.1;
-    const freq = Math.max(55, (rpm / 60) * classPitch);
-    this.oscPrimary.frequency.setTargetAtTime(freq, t, 0.03);
-    this.oscHarmonic.frequency.setTargetAtTime(freq * (isBoosting ? 2.02 : 1.5), t, 0.03);
+    const params = computeEngineAudioParams(rpm, throttle, isBoosting, bikeClass, gear);
 
-    const filterFreq = 320 + (rpm / 16000) * 2400 + (isBoosting ? 850 : 0);
-    this.exhaustFilter.frequency.setTargetAtTime(filterFreq, t, 0.04);
+    if (this.currentEngineClass !== bikeClass) {
+      this.currentEngineClass = bikeClass;
+      this.oscPrimary.type = params.primaryWave;
+      this.oscSub.type = params.subWave;
+      this.oscOvertone.type = params.overtoneWave;
+      this.exhaustFilter.Q.setTargetAtTime(params.filterQ, t, 0.04);
+      this.subGainNode.gain.setTargetAtTime(params.subGain, t, 0.04);
+      this.overtoneGainNode.gain.setTargetAtTime(params.overtoneGain, t, 0.04);
+    }
 
-    const vol = 0.085 + throttle * 0.13 + (isBoosting ? 0.055 : 0);
-    this.engineGain.gain.setTargetAtTime(vol, t, 0.04);
+    // Trigger quickshifter cut/blip when gear shifts while actively rolling
+    if (gear !== this.lastGear) {
+      const isUpshift = gear > this.lastGear;
+      this.lastGear = gear;
+      this.gearDipUntil = t + 0.055;
+      this.playGearShift(isUpshift, bikeClass);
+    }
+
+    this.oscPrimary.frequency.setTargetAtTime(params.fundamentalHz, t, 0.025);
+    this.oscSub.frequency.setTargetAtTime(params.subHarmonicHz, t, 0.025);
+    this.oscOvertone.frequency.setTargetAtTime(params.overtoneHz, t, 0.025);
+    this.exhaustFilter.frequency.setTargetAtTime(params.filterHz, t, 0.035);
+
+    const cutScale = t < this.gearDipUntil ? 0.38 : 1.0;
+    this.engineGain.gain.setTargetAtTime(params.masterEngineGain * cutScale, t, 0.028);
   }
 
   public updateSurfaceSfx(surface: SurfaceType, speedMs: number, active: boolean): void {
@@ -337,15 +610,12 @@ export class MotoAudioEngine {
 
     const speedRatio = Math.min(1, speedMs / 55);
     if (surface === 'curb') {
-      // Low-mid serrated curb rumble
       this.surfaceFilter.frequency.setTargetAtTime(240 + speedRatio * 180, t, 0.03);
       this.surfaceGain.gain.setTargetAtTime(0.065 * speedRatio, t, 0.03);
     } else if (surface === 'gravel') {
-      // Crisp high-frequency gravel spray
       this.surfaceFilter.frequency.setTargetAtTime(1600 + speedRatio * 1100, t, 0.03);
       this.surfaceGain.gain.setTargetAtTime(0.16 * speedRatio, t, 0.03);
     } else {
-      // Grass rustle
       this.surfaceFilter.frequency.setTargetAtTime(750 + speedRatio * 400, t, 0.03);
       this.surfaceGain.gain.setTargetAtTime(0.08 * speedRatio, t, 0.03);
     }
@@ -375,27 +645,38 @@ export class MotoAudioEngine {
     osc.stop(t + (isGo ? 0.4 : 0.18));
   }
 
-  public playGearShift(): void {
+  public playGearShift(isUpshift = true, bikeClass: BikeClassId = 'motogp'): void {
     if (this.muted || !this.ctx || !this.masterGain) return;
     const t = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
     const gain = this.ctx.createGain();
-    osc.type = 'square';
-    osc.frequency.setValueAtTime(240, t);
-    osc.frequency.exponentialRampToValueAtTime(115, t + 0.05);
-    gain.gain.setValueAtTime(0.08, t);
-    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.055);
+    const classScale = bikeClass === 'moto3' ? 1.25 : bikeClass === 'moto2' ? 1.08 : 1.0;
+
+    if (isUpshift) {
+      // Seamless quickshifter exhaust crackle + pitch drop
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(240 * classScale, t);
+      osc.frequency.exponentialRampToValueAtTime(95 * classScale, t + 0.055);
+      gain.gain.setValueAtTime(0.095, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
+    } else {
+      // Auto-blipper throttle rev-match chirp on downshift
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(160 * classScale, t);
+      osc.frequency.exponentialRampToValueAtTime(340 * classScale, t + 0.065);
+      gain.gain.setValueAtTime(0.085, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.075);
+    }
     osc.connect(gain);
     gain.connect(this.masterGain);
     osc.start(t);
-    osc.stop(t + 0.06);
+    osc.stop(t + 0.08);
   }
 
   public playBoostStart(): void {
     if (this.muted || !this.ctx || !this.masterGain) return;
     const t = this.ctx.currentTime;
 
-    // Rising turbine tone
     const osc = this.ctx.createOscillator();
     const gain = this.ctx.createGain();
     osc.type = 'sine';
@@ -408,7 +689,6 @@ export class MotoAudioEngine {
     osc.start(t);
     osc.stop(t + 0.3);
 
-    // Filtered air-intake whoosh
     if (this.noiseBuffer) {
       const n = this.ctx.createBufferSource();
       n.buffer = this.noiseBuffer;
@@ -481,6 +761,44 @@ export class MotoAudioEngine {
     });
   }
 
+  public playWeatherCue(isRain: boolean): void {
+    if (this.muted || !this.ctx || !this.masterGain) return;
+    const notes = isRain ? [392.0, 329.63, 293.66] : [440.0, 523.25];
+    notes.forEach((freq, idx) => {
+      if (!this.ctx || !this.masterGain) return;
+      const t = this.ctx.currentTime + idx * 0.09;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, t);
+      gain.gain.setValueAtTime(0.09, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.24);
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      osc.start(t);
+      osc.stop(t + 0.25);
+    });
+  }
+
+  public playBroadcastChime(): void {
+    if (this.muted || !this.ctx || !this.masterGain) return;
+    const notes = [440.0, 587.33, 880.0];
+    notes.forEach((freq, idx) => {
+      if (!this.ctx || !this.masterGain) return;
+      const t = this.ctx.currentTime + idx * 0.065;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, t);
+      gain.gain.setValueAtTime(0.12, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      osc.start(t);
+      osc.stop(t + 0.24);
+    });
+  }
+
   public dispose(): void {
     if (this.bgmTimer !== null) {
       clearInterval(this.bgmTimer);
@@ -488,7 +806,8 @@ export class MotoAudioEngine {
     }
     try {
       this.oscPrimary?.stop();
-      this.oscHarmonic?.stop();
+      this.oscSub?.stop();
+      this.oscOvertone?.stop();
       this.surfaceSource?.stop();
       void this.ctx?.close();
     } catch {

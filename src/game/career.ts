@@ -1,7 +1,7 @@
 import { getCircuit } from './trackMath';
 import {
   BIKE_CLASSES,
-  TEAM_LIVERIES,
+  getClassLiveries,
   type BikeClassId,
   type CircuitId,
   type RaceResultEntry,
@@ -106,6 +106,7 @@ export interface CareerProgress {
   qualifyingLapMs: number | null;
   qualifyingOrderIds: string[]; // ordered AI livery IDs from fastest to slowest
   seasonPoints: number;
+  seasonStandings: Record<string, number>; // points keyed by 'local' + AI livery.id
   totalPoints: number;
   wins: number;
   podiums: number;
@@ -114,12 +115,24 @@ export interface CareerProgress {
   lastSeasonSummary: {
     classId: BikeClassId;
     points: number;
+    finalSeasonRank: number;
     promotedTo: BikeClassId | null;
     wonTitle: boolean;
   } | null;
 }
 
-const STORAGE_KEY = 'apexgp_career_v2';
+export interface CareerStandingEntry {
+  id: string;
+  rank: number;
+  name: string;
+  livery: TeamLivery;
+  points: number;
+  isPlayer: boolean;
+  inPromotionZone: boolean;
+}
+
+const STORAGE_KEY = 'apexgp_career_v3';
+const LEGACY_STORAGE_KEY = 'apexgp_career_v2';
 
 // Official MotoGP championship points table (1st..15th)
 export const POINTS_BY_RANK = [25, 20, 16, 13, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
@@ -133,6 +146,7 @@ export function createDefaultCareerProgress(): CareerProgress {
     qualifyingLapMs: null,
     qualifyingOrderIds: [],
     seasonPoints: 0,
+    seasonStandings: {},
     totalPoints: 0,
     wins: 0,
     podiums: 0,
@@ -145,7 +159,7 @@ export function createDefaultCareerProgress(): CareerProgress {
 export function loadCareerProgress(): CareerProgress {
   if (typeof window === 'undefined') return createDefaultCareerProgress();
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw = window.localStorage.getItem(STORAGE_KEY) ?? window.localStorage.getItem(LEGACY_STORAGE_KEY);
     if (!raw) return createDefaultCareerProgress();
     const parsed = JSON.parse(raw) as Partial<CareerProgress>;
     if (!parsed.activeClass || !Array.isArray(parsed.unlockedClasses)) {
@@ -154,6 +168,7 @@ export function loadCareerProgress(): CareerProgress {
     return {
       ...createDefaultCareerProgress(),
       ...parsed,
+      seasonStandings: parsed.seasonStandings ?? {},
     };
   } catch {
     return createDefaultCareerProgress();
@@ -180,23 +195,121 @@ export function getPointsForRank(rank: number): number {
   return POINTS_BY_RANK[rank - 1];
 }
 
+export function getCareerSeasonStandings(
+  progress: CareerProgress,
+  playerName?: string,
+  playerLivery?: TeamLivery,
+): CareerStandingEntry[] {
+  const roster = getClassLiveries(progress.activeClass);
+  const chosenPlayerLiv = playerLivery && roster.some((r) => r.id === playerLivery.id) ? playerLivery : roster[0];
+  const aiRivals = roster.filter((r) => r.id !== chosenPlayerLiv.id);
+  const standings = progress.seasonStandings ?? {};
+
+  const rows: Array<{
+    id: string;
+    name: string;
+    livery: TeamLivery;
+    points: number;
+    isPlayer: boolean;
+    order: number;
+  }> = [
+    {
+      id: 'local',
+      name: playerName || chosenPlayerLiv.riderName,
+      livery: chosenPlayerLiv,
+      points: standings['local'] ?? progress.seasonPoints ?? 0,
+      isPlayer: true,
+      order: 0,
+    },
+    ...aiRivals.map((liv, idx) => ({
+      id: liv.id,
+      name: liv.riderName,
+      livery: liv,
+      points: standings[liv.id] ?? 0,
+      isPlayer: false,
+      order: idx + 1,
+    })),
+  ];
+
+  rows.sort((a, b) => {
+    if (b.points !== a.points) return b.points - a.points;
+    if (a.isPlayer !== b.isPlayer) return a.isPlayer ? -1 : 1;
+    return a.order - b.order;
+  });
+
+  return rows.map((row, idx) => ({
+    id: row.id,
+    rank: idx + 1,
+    name: row.name,
+    livery: row.livery,
+    points: row.points,
+    isPlayer: row.isPlayer,
+    inPromotionZone: idx < 3,
+  }));
+}
+
 export function applyCareerRaceOutcome(
   current: CareerProgress,
-  playerRank: number,
+  rankOrResults: number | RaceResultEntry[],
+  playerLivery?: TeamLivery,
 ): {
   updated: CareerProgress;
   pointsEarned: number;
+  seasonRank: number;
   promotedTo: BikeClassId | null;
   seasonFinished: boolean;
   wonChampionship: boolean;
 } {
   const champ = CAREER_CHAMPIONSHIPS[current.activeClass];
+  const roster = getClassLiveries(current.activeClass);
+  const chosenPlayerLiv = playerLivery && roster.some((r) => r.id === playerLivery.id) ? playerLivery : roster[0];
+
+  const isResultsArray = Array.isArray(rankOrResults);
+  const playerRank = isResultsArray ? findPlayerRankFromResults(rankOrResults) : rankOrResults;
   const pointsEarned = getPointsForRank(playerRank);
   const newSeasonPoints = current.seasonPoints + pointsEarned;
   const newTotalPoints = current.totalPoints + pointsEarned;
   const wins = current.wins + (playerRank === 1 ? 1 : 0);
   const podiums = current.podiums + (playerRank <= 3 ? 1 : 0);
   const racesCompleted = current.racesCompleted + 1;
+
+  // Update full 22-rider championship points table
+  const nextStandings: Record<string, number> = { ...(current.seasonStandings ?? {}) };
+  nextStandings['local'] = (nextStandings['local'] ?? current.seasonPoints) + pointsEarned;
+
+  if (isResultsArray && rankOrResults.length > 1) {
+    for (const entry of rankOrResults) {
+      if (entry.isPlayer) continue;
+      const lid = entry.livery.id;
+      nextStandings[lid] = (nextStandings[lid] ?? 0) + getPointsForRank(entry.rank);
+    }
+  } else {
+    // Deterministic AI round classification across remaining slots
+    const aiPool = roster.filter((r) => r.id !== chosenPlayerLiv.id);
+    const remainingRanks: number[] = [];
+    for (let r = 1; r <= DEFAULT_RACE_RIDER_COUNT; r++) {
+      if (r !== playerRank) remainingRanks.push(r);
+    }
+    const shift = (current.currentRoundIndex * 3) % Math.max(1, Math.min(5, aiPool.length));
+    aiPool.forEach((aiLiv, idx) => {
+      // Subtle top-tier rotation across the leading 5 AI contenders
+      const rotatedIdx =
+        idx < 5 ? (idx + shift) % 5 : idx;
+      const aiRank = remainingRanks[rotatedIdx] ?? DEFAULT_RACE_RIDER_COUNT;
+      nextStandings[aiLiv.id] = (nextStandings[aiLiv.id] ?? 0) + getPointsForRank(aiRank);
+    });
+  }
+
+  const standingSnapshot = getCareerSeasonStandings(
+    {
+      ...current,
+      seasonPoints: newSeasonPoints,
+      seasonStandings: nextStandings,
+    },
+    chosenPlayerLiv.riderName,
+    chosenPlayerLiv,
+  );
+  const seasonRank = standingSnapshot.find((s) => s.isPlayer)?.rank ?? 22;
 
   const isLastRound = current.currentRoundIndex >= champ.rounds.length - 1;
   const unlocked = new Set<BikeClassId>(current.unlockedClasses);
@@ -205,14 +318,19 @@ export function applyCareerRaceOutcome(
   let nextClass: BikeClassId = current.activeClass;
   let nextRoundIndex = current.currentRoundIndex + 1;
   let nextSeasonPoints = newSeasonPoints;
+  let finalStandingsMap = nextStandings;
   let promotedTo: BikeClassId | null = null;
   let wonChampionship = false;
   let lastSeasonSummary = current.lastSeasonSummary;
 
   if (isLastRound) {
-    wonChampionship = newSeasonPoints >= champ.pointsToAdvance;
+    // End of 20-round season: Top 1-3 in championship standings promote (Moto3 -> Moto2 -> MotoGP)
+    const qualifiesTop3 = seasonRank <= 3;
+    wonChampionship = seasonRank === 1;
     if (wonChampionship) {
       champsWon.add(current.activeClass);
+    }
+    if (qualifiesTop3) {
       if (current.activeClass === 'moto3') {
         unlocked.add('moto2');
         nextClass = 'moto2';
@@ -226,11 +344,13 @@ export function applyCareerRaceOutcome(
     lastSeasonSummary = {
       classId: current.activeClass,
       points: newSeasonPoints,
+      finalSeasonRank: seasonRank,
       promotedTo,
       wonTitle: wonChampionship,
     };
     nextRoundIndex = 0;
     nextSeasonPoints = 0;
+    finalStandingsMap = {};
   }
 
   return {
@@ -242,6 +362,7 @@ export function applyCareerRaceOutcome(
       qualifyingLapMs: null,
       qualifyingOrderIds: [],
       seasonPoints: nextSeasonPoints,
+      seasonStandings: finalStandingsMap,
       totalPoints: newTotalPoints,
       wins,
       podiums,
@@ -250,6 +371,7 @@ export function applyCareerRaceOutcome(
       lastSeasonSummary,
     },
     pointsEarned,
+    seasonRank,
     promotedTo,
     seasonFinished: isLastRound,
     wonChampionship,
@@ -281,7 +403,8 @@ export function buildQualifyingClassification(params: {
   playerGridPos: number;
   orderedAiLiveryIds: string[];
 } {
-  const riderCount = Math.max(2, Math.min(TEAM_LIVERIES.length, params.riderCount ?? DEFAULT_RACE_RIDER_COUNT));
+  const roster = getClassLiveries(params.bikeClass);
+  const riderCount = Math.max(2, Math.min(roster.length, params.riderCount ?? DEFAULT_RACE_RIDER_COUNT));
   const circuit = getCircuit(params.circuitId);
   const spec = BIKE_CLASSES[params.bikeClass];
 
@@ -290,7 +413,7 @@ export function buildQualifyingClassification(params: {
   const poleAvgSpeedMs = spec.topSpeedMs * avgCornerRatio * (0.98 + (params.aiDifficulty - 0.94) * 0.25);
   const poleLapMs = Math.round((circuit.totalLength / Math.max(36, poleAvgSpeedMs)) * 1000);
 
-  const aiPool = TEAM_LIVERIES.filter((l) => l.id !== params.playerLivery.id).slice(0, riderCount - 1);
+  const aiPool = roster.filter((l) => l.id !== params.playerLivery.id).slice(0, riderCount - 1);
   const entries: RaceResultEntry[] = [
     {
       id: 'local',

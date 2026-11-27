@@ -12,14 +12,16 @@ import {
 } from './trackMath';
 import type { ProceduralTextures } from './textures';
 import { buildTracksideLayout } from './tracksideLayout';
-import type { SolidCollider } from './types';
+import type { RainPatch, SolidCollider } from './types';
 
 export interface TrackWorld {
   group: THREE.Group;
   startLights: THREE.Mesh[];
   colliders: SolidCollider[];
   setStartLights: (litCount: number, allGreen?: boolean) => void;
+  syncRainPatches: (patches: RainPatch[], rainIntensity: number) => void;
   updateCrowd: (timeSec: number, focusX: number, focusZ: number) => void;
+  updateMarshals: (timeSec: number, preRaceActive: boolean) => void;
   dispose: () => void;
 }
 
@@ -895,6 +897,147 @@ export function createTrackWorld(circuit: CircuitData, textures: ProceduralTextu
   group.add(hills);
   disposables.push(hillGeo, hillMat);
 
+  // 14. Animated 3D Track Marshals Waving Flags along Grid & Corner Posts
+  interface MarshalRig {
+    root: THREE.Group;
+    torso: THREE.Group;
+    flagArm: THREE.Group;
+    flagCloth: THREE.Mesh;
+    phase: number;
+    isGridMarshal: boolean;
+  }
+
+  const marshals: MarshalRig[] = [];
+  const mSuitMat = new THREE.MeshStandardMaterial({ color: 0xf97316, roughness: 0.58 }); // Hi-vis FIA orange marshal suit
+  const mStripeMat = new THREE.MeshStandardMaterial({ color: 0xeab308, roughness: 0.45 }); // Reflective yellow vest band
+  const mHelmetMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.25 });
+  const mBootMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.72 });
+  const mPoleMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, metalness: 0.65, roughness: 0.35 });
+  const mGreenFlagMat = new THREE.MeshStandardMaterial({ color: 0x16a34a, roughness: 0.48, side: THREE.DoubleSide });
+  const mCheckFlagMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    map: textures.checkeredMap,
+    roughness: 0.48,
+    side: THREE.DoubleSide,
+  });
+
+  const mLegGeo = new THREE.CapsuleGeometry(0.085, 0.48, 4, 8);
+  const mTorsoGeo = new THREE.CapsuleGeometry(0.17, 0.38, 6, 10);
+  const mVestGeo = new THREE.BoxGeometry(0.36, 0.14, 0.26);
+  const mHeadGeo = new THREE.SphereGeometry(0.145, 10, 8);
+  const mArmGeo = new THREE.CapsuleGeometry(0.055, 0.34, 4, 8);
+  const mPoleGeo = new THREE.CylinderGeometry(0.022, 0.024, 1.45, 6);
+  const mClothGeo = new THREE.PlaneGeometry(0.86, 0.56, 4, 2);
+
+  disposables.push(
+    mSuitMat,
+    mStripeMat,
+    mHelmetMat,
+    mBootMat,
+    mPoleMat,
+    mGreenFlagMat,
+    mCheckFlagMat,
+    mLegGeo,
+    mTorsoGeo,
+    mVestGeo,
+    mHeadGeo,
+    mArmGeo,
+    mPoleGeo,
+    mClothGeo,
+  );
+
+  const marshalPosts: Array<{ s: number; lat: number; grid: boolean; checkered: boolean }> = [
+    { s: START_LINE_S - 6, lat: -(TRACK_HALF_WIDTH + 2.5), grid: true, checkered: false },
+    { s: START_LINE_S - 18, lat: TRACK_HALF_WIDTH + 2.5, grid: true, checkered: false },
+    { s: START_LINE_S + 8, lat: TRACK_HALF_WIDTH + 2.7, grid: true, checkered: true },
+    { s: t1EntryS + 16, lat: TRACK_HALF_WIDTH + 2.9, grid: false, checkered: false },
+    { s: circuit.totalLength * 0.42, lat: -(TRACK_HALF_WIDTH + 2.9), grid: false, checkered: false },
+    { s: circuit.totalLength * 0.72, lat: TRACK_HALF_WIDTH + 2.9, grid: false, checkered: false },
+  ];
+
+  marshalPosts.forEach((post, idx) => {
+    const smp = sampleTrackAtS(circuit, post.s);
+    const root = new THREE.Group();
+    root.position.set(smp.x + smp.nx * post.lat, 0, smp.z + smp.nz * post.lat);
+    // Face track centerline
+    const trackDirX = -smp.nx * Math.sign(post.lat);
+    const trackDirZ = -smp.nz * Math.sign(post.lat);
+    root.rotation.y = Math.atan2(trackDirX, trackDirZ);
+
+    const legL = new THREE.Mesh(mLegGeo, mBootMat);
+    legL.position.set(0.11, 0.36, 0);
+    const legR = new THREE.Mesh(mLegGeo, mBootMat);
+    legR.position.set(-0.11, 0.36, 0);
+    root.add(legL, legR);
+
+    const torso = new THREE.Group();
+    torso.position.set(0, 0.68, 0);
+    root.add(torso);
+
+    const body = new THREE.Mesh(mTorsoGeo, mSuitMat);
+    body.position.y = 0.28;
+    body.scale.set(1.1, 1.0, 0.85);
+    body.castShadow = true;
+    torso.add(body);
+
+    const vest = new THREE.Mesh(mVestGeo, mStripeMat);
+    vest.position.y = 0.3;
+    torso.add(vest);
+
+    const helmet = new THREE.Mesh(mHeadGeo, mHelmetMat);
+    helmet.position.set(0, 0.68, 0.02);
+    torso.add(helmet);
+
+    const restArm = new THREE.Mesh(mArmGeo, mSuitMat);
+    restArm.position.set(-0.24, 0.26, 0.05);
+    restArm.rotation.z = -0.2;
+    torso.add(restArm);
+
+    const flagArm = new THREE.Group();
+    flagArm.position.set(0.24, 0.48, 0.02);
+    torso.add(flagArm);
+
+    const waveArm = new THREE.Mesh(mArmGeo, mSuitMat);
+    waveArm.position.set(0.06, 0.2, 0.08);
+    waveArm.rotation.x = -0.35;
+    flagArm.add(waveArm);
+
+    const pole = new THREE.Mesh(mPoleGeo, mPoleMat);
+    pole.position.set(0.08, 0.82, 0.16);
+    flagArm.add(pole);
+
+    const flagCloth = new THREE.Mesh(mClothGeo, post.checkered ? mCheckFlagMat : mGreenFlagMat);
+    flagCloth.position.set(0.08, 1.24, 0.58);
+    flagCloth.rotation.y = Math.PI / 2;
+    flagArm.add(flagCloth);
+
+    group.add(root);
+    marshals.push({
+      root,
+      torso,
+      flagArm,
+      flagCloth,
+      phase: idx * 1.15,
+      isGridMarshal: post.grid,
+    });
+  });
+
+  const updateMarshals = (timeSec: number, preRaceActive: boolean) => {
+    const vigor = preRaceActive ? 1.35 : 0.85;
+    const speed = preRaceActive ? 5.6 : 3.8;
+    for (const m of marshals) {
+      const wave = Math.sin(timeSec * speed + m.phase);
+      const flutter = Math.cos(timeSec * (speed * 1.9) + m.phase);
+      const amp = (m.isGridMarshal ? 0.55 : 0.38) * vigor;
+      m.torso.rotation.z = wave * 0.07;
+      m.flagArm.rotation.z = -0.25 + wave * amp;
+      m.flagArm.rotation.x = Math.sin(timeSec * speed * 0.7 + m.phase) * 0.22;
+      m.flagCloth.rotation.y = Math.PI / 2 + flutter * 0.28;
+      m.flagCloth.rotation.z = wave * 0.14;
+    }
+  };
+  updateMarshals(0, true);
+
   const setStartLights = (litCount: number, allGreen = false) => {
     for (let i = 0; i < startLights.length; i++) {
       const mat = startLights[i].material as THREE.MeshStandardMaterial;
@@ -914,12 +1057,53 @@ export function createTrackWorld(circuit: CircuitData, textures: ProceduralTextu
     }
   };
 
+  // 15. Pooled 3D Wet Asphalt Rain Patch Decals (rendered dynamically when weather shifts to clouds/rain)
+  const maxPuddleCount = 16;
+  const puddleGeo = new THREE.PlaneGeometry(2, 2);
+  puddleGeo.rotateX(-Math.PI / 2);
+  const puddleMat = new THREE.MeshBasicMaterial({
+    map: textures.wetPuddleMap,
+    transparent: true,
+    opacity: 0.78,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+  });
+  disposables.push(puddleGeo, puddleMat);
+
+  const puddleMeshes: THREE.Mesh[] = [];
+  for (let i = 0; i < maxPuddleCount; i++) {
+    const pm = new THREE.Mesh(puddleGeo, puddleMat);
+    pm.visible = false;
+    pm.position.set(0, 0.025, 0);
+    group.add(pm);
+    puddleMeshes.push(pm);
+  }
+
+  const syncRainPatches = (patches: RainPatch[], rainIntensity: number) => {
+    puddleMat.opacity = Math.min(0.88, 0.42 + rainIntensity * 0.48);
+    for (let i = 0; i < maxPuddleCount; i++) {
+      const mesh = puddleMeshes[i];
+      if (i < patches.length) {
+        const p = patches[i];
+        mesh.visible = true;
+        mesh.position.set(p.x, 0.026, p.z);
+        mesh.rotation.y = p.heading;
+        mesh.scale.set(p.radiusLat, 1, p.radiusS);
+      } else {
+        mesh.visible = false;
+      }
+    }
+  };
+
   return {
     group,
     startLights,
     colliders: layout.colliders,
     setStartLights,
+    syncRainPatches,
     updateCrowd,
+    updateMarshals,
     dispose: () => {
       disposables.forEach((d) => d.dispose());
     },

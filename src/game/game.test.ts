@@ -553,3 +553,599 @@ test('minimap geometry fits all 6 circuits cleanly inside viewport with start/fi
     }
   }
 });
+
+test('Moto3, Moto2, and MotoGP each have dedicated 22-rider rosters with unique IDs and numbers', async () => {
+  const { getClassLiveries, MOTO2_RIDERS, MOTO3_RIDERS, MOTOGP_RIDERS } = await import('./types');
+
+  for (const [label, roster] of [
+    ['Moto3', MOTO3_RIDERS],
+    ['Moto2', MOTO2_RIDERS],
+    ['MotoGP', MOTOGP_RIDERS],
+  ] as const) {
+    assert.equal(roster.length, 22, `${label} should have 22 riders`);
+    assert.equal(new Set(roster.map((r) => r.id)).size, 22, `${label} IDs must be unique`);
+    assert.equal(new Set(roster.map((r) => r.number)).size, 22, `${label} numbers must be unique`);
+  }
+
+  assert.equal(getClassLiveries('moto3')[0].riderName, MOTO3_RIDERS[0].riderName);
+  assert.equal(getClassLiveries('moto2')[0].riderName, MOTO2_RIDERS[0].riderName);
+  assert.equal(getClassLiveries('motogp')[0].riderName, MOTOGP_RIDERS[0].riderName);
+  assert.notEqual(MOTO3_RIDERS[0].riderName, MOTO2_RIDERS[0].riderName);
+  assert.notEqual(MOTO2_RIDERS[0].riderName, MOTOGP_RIDERS[0].riderName);
+});
+
+test('live leaderboard slices cycle cleanly across 1-5, 6-10, 11-15 and wrap back to 1-5', async () => {
+  const { getLeaderboardPageSlice } = await import('./leaderboard');
+  const { MOTOGP_RIDERS } = await import('./types');
+
+  const board = MOTOGP_RIDERS.map((liv, idx) => ({
+    id: liv.id,
+    rank: idx + 1,
+    name: liv.riderName,
+    color: liv.primaryHex,
+    liveryId: liv.id,
+    nationality: liv.nationality,
+    isPlayer: idx === 12, // player running P13
+    crashed: false,
+  }));
+
+  const page0 = getLeaderboardPageSlice(board, 0);
+  assert.equal(page0.rangeLabel, '1-5');
+  assert.equal(page0.totalPages, 3);
+  assert.deepEqual(page0.rows.map((r) => r.rank), [1, 2, 3, 4, 5]);
+  assert.equal(page0.pinnedPlayer?.rank, 13);
+
+  const page1 = getLeaderboardPageSlice(board, 1);
+  assert.equal(page1.rangeLabel, '6-10');
+  assert.deepEqual(page1.rows.map((r) => r.rank), [6, 7, 8, 9, 10]);
+  assert.equal(page1.pinnedPlayer?.rank, 13);
+
+  const page2 = getLeaderboardPageSlice(board, 2);
+  assert.equal(page2.rangeLabel, '11-15');
+  assert.deepEqual(page2.rows.map((r) => r.rank), [11, 12, 13, 14, 15]);
+  assert.equal(page2.pinnedPlayer, null);
+
+  const page3 = getLeaderboardPageSlice(board, 3);
+  assert.equal(page3.rangeLabel, '1-5');
+  assert.equal(page3.pageIndex, 0);
+});
+
+test('career qualifying draws AI competitors strictly from the active bike class roster', async () => {
+  const { buildQualifyingClassification } = await import('./career');
+  const { MOTO2_RIDERS, MOTO3_RIDERS } = await import('./types');
+
+  const m3Set = new Set(MOTO3_RIDERS.map((r) => r.id));
+  const m3Quali = buildQualifyingClassification({
+    circuitId: 'lusail',
+    bikeClass: 'moto3',
+    aiDifficulty: 0.96,
+    playerLivery: MOTO3_RIDERS[0],
+    playerName: MOTO3_RIDERS[0].riderName,
+    playerLapMs: 92000,
+    playerTopSpeedKmh: 230,
+  });
+  assert.equal(m3Quali.results.length, 22);
+  assert.ok(m3Quali.orderedAiLiveryIds.every((id) => m3Set.has(id)));
+
+  const m2Set = new Set(MOTO2_RIDERS.map((r) => r.id));
+  const m2Quali = buildQualifyingClassification({
+    circuitId: 'mugello',
+    bikeClass: 'moto2',
+    aiDifficulty: 0.97,
+    playerLivery: MOTO2_RIDERS[0],
+    playerName: MOTO2_RIDERS[0].riderName,
+    playerLapMs: 85000,
+    playerTopSpeedKmh: 270,
+  });
+  assert.equal(m2Quali.results.length, 22);
+  assert.ok(m2Quali.orderedAiLiveryIds.every((id) => m2Set.has(id)));
+});
+
+test('procedural engine audio synthesizes distinct Moto3, Moto2, and MotoGP profiles with RPM & gear pitch shift', async () => {
+  const { computeEngineAudioParams } = await import('./audio');
+
+  const m3 = computeEngineAudioParams(10000, 1, false, 'moto3', 3);
+  const m2 = computeEngineAudioParams(10000, 1, false, 'moto2', 3);
+  const gp = computeEngineAudioParams(10000, 1, false, 'motogp', 3);
+
+  assert.notEqual(m3.fundamentalHz, m2.fundamentalHz);
+  assert.notEqual(m2.fundamentalHz, gp.fundamentalHz);
+  assert.equal(m3.subHarmonicHz / m3.fundamentalHz, 0.5);
+  assert.equal(m2.subHarmonicHz / m2.fundamentalHz, 1.5);
+  assert.equal(gp.subHarmonicHz / gp.fundamentalHz, 0.75);
+
+  const lowRpm = computeEngineAudioParams(5000, 0.5, false, 'motogp', 2);
+  const highRpm = computeEngineAudioParams(15000, 1.0, false, 'motogp', 2);
+  assert.ok(highRpm.fundamentalHz > lowRpm.fundamentalHz * 2.5);
+  assert.ok(highRpm.filterHz > lowRpm.filterHz);
+
+  const g1 = computeEngineAudioParams(12000, 1, false, 'motogp', 1);
+  const g6 = computeEngineAudioParams(12000, 1, false, 'motogp', 6);
+  assert.ok(g6.fundamentalHz > g1.fundamentalHz);
+});
+
+test('career 22-rider season standings promotes Top 1-3 across classes and denies 4th+ place', async () => {
+  const {
+    applyCareerRaceOutcome,
+    createDefaultCareerProgress,
+    getCareerSeasonStandings,
+  } = await import('./career');
+
+  // 1. Consistently P2 finishes Moto3 in Top 3 -> promotes to Moto2
+  let c = createDefaultCareerProgress();
+  for (let r = 0; r < 19; r++) {
+    c = applyCareerRaceOutcome(c, 2).updated;
+  }
+  const standingBeforeLast = getCareerSeasonStandings(c);
+  assert.equal(standingBeforeLast.length, 22);
+  assert.ok((standingBeforeLast.find((s) => s.isPlayer)?.rank ?? 22) <= 3);
+
+  const m3Promo = applyCareerRaceOutcome(c, 3);
+  assert.equal(m3Promo.seasonFinished, true);
+  assert.ok(m3Promo.seasonRank <= 3);
+  assert.equal(m3Promo.promotedTo, 'moto2');
+  assert.equal(m3Promo.updated.activeClass, 'moto2');
+
+  // 2. Moto2 consistent Top 3 finishes -> promotes to MotoGP
+  let m2 = m3Promo.updated;
+  for (let r = 0; r < 19; r++) {
+    m2 = applyCareerRaceOutcome(m2, 1).updated;
+  }
+  const m2Promo = applyCareerRaceOutcome(m2, 1);
+  assert.equal(m2Promo.seasonFinished, true);
+  assert.equal(m2Promo.seasonRank, 1);
+  assert.equal(m2Promo.promotedTo, 'motogp');
+  assert.equal(m2Promo.updated.activeClass, 'motogp');
+
+  // 3. Finishing outside Top 3 (e.g., P10 every race) does NOT promote
+  let back = createDefaultCareerProgress();
+  for (let r = 0; r < 19; r++) {
+    back = applyCareerRaceOutcome(back, 10).updated;
+  }
+  const denied = applyCareerRaceOutcome(back, 10);
+  assert.equal(denied.seasonFinished, true);
+  assert.ok(denied.seasonRank > 3, `expected seasonRank > 3, got ${denied.seasonRank}`);
+  assert.equal(denied.promotedTo, null);
+  assert.equal(denied.updated.activeClass, 'moto3');
+});
+
+test('steering sensitivity clamps safely and smooths left/right turn-in responsiveness', async () => {
+  const {
+    clampSteeringSensitivity,
+    computeSteerInputStep,
+    DEFAULT_STEERING_SENSITIVITY,
+  } = await import('./physics');
+
+  assert.equal(clampSteeringSensitivity(0.05), 0.25);
+  assert.equal(clampSteeringSensitivity(2.5), 1.2);
+  assert.equal(clampSteeringSensitivity(Number.NaN), DEFAULT_STEERING_SENSITIVITY);
+  assert.equal(clampSteeringSensitivity(0.6), 0.6);
+
+  const lowSensStep = computeSteerInputStep(1, 0, 0.35, 0.016);
+  const highSensStep = computeSteerInputStep(1, 0, 1.15, 0.016);
+  assert.ok(lowSensStep > 0 && lowSensStep < highSensStep);
+  assert.ok(highSensStep <= 1.15);
+
+  const centered = computeSteerInputStep(0, 0.001, 0.6, 0.05);
+  assert.equal(centered, 0);
+});
+
+test('dynamic weather transitions from clear skies to clouds and asymmetric rain patches affecting racing lines', async () => {
+  const {
+    createInitialWeatherState,
+    evaluateRainPatchAt,
+    findNearestRainPatchAhead,
+    stepDynamicWeather,
+  } = await import('./weather');
+  const { computeAiInput, createInitialBikeState, stepBikePhysics } = await import('./physics');
+  const { getCircuit, sampleTrackAtS, TRACK_HALF_WIDTH } = await import('./trackMath');
+  const { MOTOGP_RIDERS } = await import('./types');
+
+  const circuit = getCircuit('lusail');
+  const weather = createInitialWeatherState(2026);
+  assert.equal(weather.phase, 'clear');
+  assert.equal(weather.patches.length, 0);
+
+  stepDynamicWeather(weather, circuit, 8000, 0.1, false);
+  assert.equal(weather.phase, 'clouds');
+
+  stepDynamicWeather(weather, circuit, 15000, 0.5, false);
+  assert.equal(weather.phase, 'rain');
+  assert.equal(weather.patches.length, 10);
+
+  for (const patch of weather.patches) {
+    assert.ok(Math.abs(patch.lateralCenter) < TRACK_HALF_WIDTH);
+    assert.ok(patch.radiusS > 0 && patch.radiusLat > 0);
+  }
+
+  const targetPatch = weather.patches[0];
+  const wetCheck = evaluateRainPatchAt(circuit, targetPatch.s, targetPatch.lateralCenter, weather.patches);
+  assert.equal(wetCheck.onPatch, true);
+  assert.ok(wetCheck.wetness > 0.5);
+
+  const drySideOffset = targetPatch.lateralCenter >= 0 ? -5.8 : 5.8;
+  const dryCheck = evaluateRainPatchAt(circuit, targetPatch.s, drySideOffset, weather.patches);
+  assert.equal(dryCheck.onPatch, false);
+
+  const aheadFound = findNearestRainPatchAhead(circuit, targetPatch.s - 20, 60, weather.patches);
+  assert.ok(aheadFound !== null);
+
+  // Physics marks onRainPatch & AI steers away from wet patch directly in front of its lane
+  const patchSmp = sampleTrackAtS(circuit, targetPatch.s);
+  const bikeDry = createInitialBikeState({
+    id: 'test-ai',
+    name: MOTOGP_RIDERS[0].riderName,
+    livery: MOTOGP_RIDERS[0],
+    bikeClass: 'motogp',
+    slotIndex: 0,
+    circuit,
+    isPlayer: false,
+    isRemote: false,
+    isAi: true,
+  });
+  bikeDry.x = patchSmp.x + patchSmp.nx * targetPatch.lateralCenter;
+  bikeDry.z = patchSmp.z + patchSmp.nz * targetPatch.lateralCenter;
+  bikeDry.heading = Math.atan2(patchSmp.tx, patchSmp.tz);
+  bikeDry.trackS = targetPatch.s;
+  bikeDry.trackOffset = targetPatch.lateralCenter;
+  bikeDry.speed = 62;
+  stepBikePhysics(
+    bikeDry,
+    { throttle: 1, brake: 0, steer: 0, boost: false },
+    0.05,
+    circuit,
+    15500,
+    3,
+    true,
+    [],
+    weather.patches,
+    weather.rainIntensity,
+  );
+  assert.equal(bikeDry.onRainPatch, true);
+
+  const aheadS = (targetPatch.s - 18 + circuit.totalLength) % circuit.totalLength;
+  const aheadSmp = sampleTrackAtS(circuit, aheadS);
+  const aiApproaching = createInitialBikeState({
+    id: 'test-ai-2',
+    name: MOTOGP_RIDERS[1].riderName,
+    livery: MOTOGP_RIDERS[1],
+    bikeClass: 'motogp',
+    slotIndex: 1,
+    circuit,
+    isPlayer: false,
+    isRemote: false,
+    isAi: true,
+  });
+  aiApproaching.x = aheadSmp.x + aheadSmp.nx * targetPatch.lateralCenter;
+  aiApproaching.z = aheadSmp.z + aheadSmp.nz * targetPatch.lateralCenter;
+  aiApproaching.heading = Math.atan2(aheadSmp.tx, aheadSmp.tz);
+  aiApproaching.trackS = aheadS;
+  aiApproaching.trackOffset = targetPatch.lateralCenter;
+  aiApproaching.speed = 55;
+  aiApproaching.aiTargetOffset = targetPatch.lateralCenter;
+  const aiInput = computeAiInput(aiApproaching, circuit, [aiApproaching], weather.patches);
+  assert.notEqual(aiInput.steer, 0, 'AI should adjust steering to dodge rain patch ahead');
+});
+
+test('pre-race & post-race commentary reflect rider, circuit, weather rain patches, and career outcome', async () => {
+  const { buildPostRaceCommentary, buildPreRaceCommentary } = await import('./commentary');
+  const { MOTO2_RIDERS, MOTOGP_RIDERS } = await import('./types');
+
+  const pre = buildPreRaceCommentary({
+    circuitId: 'mandalika',
+    bikeClass: 'motogp',
+    sessionType: 'race',
+    playerLivery: MOTOGP_RIDERS[0],
+    playerGridPos: 2,
+    totalRiders: 22,
+    weatherPhase: 'clear',
+  });
+  assert.ok(pre.headline.includes('Mandalika'));
+  assert.ok(pre.lines.join(' ').includes(MOTOGP_RIDERS[0].riderName));
+  assert.ok(pre.lines.join(' ').toLowerCase().includes('rain patches'));
+
+  const post = buildPostRaceCommentary({
+    circuitId: 'mugello',
+    bikeClass: 'moto2',
+    sessionType: 'race',
+    weatherHadRain: true,
+    results: [
+      {
+        id: 'local',
+        name: MOTO2_RIDERS[0].riderName,
+        livery: MOTO2_RIDERS[0],
+        rank: 1,
+        finishTimeMs: 142300,
+        bestLapMs: 70500,
+        topSpeedKmh: 289,
+        isPlayer: true,
+        isAi: false,
+      },
+    ],
+    careerOutcome: {
+      pointsEarned: 25,
+      seasonRank: 2,
+      promotedTo: 'motogp',
+      wonChampionship: false,
+    },
+  });
+  assert.ok(post.headline.includes(MOTO2_RIDERS[0].riderName));
+  assert.ok(post.lines[0].toLowerCase().includes('rain patches'));
+  assert.ok(post.lines[0].includes('MotoGP'));
+});
+
+test('MotoGP championship menu anthem generates 64-step orchestral motif and all 66 riders have valid flags & faces', async () => {
+  const { getTitleAnthemStepSpec } = await import('./audio');
+  const {
+    COUNTRY_NAMES,
+    getRiderFaceStyle,
+    MOTO2_RIDERS,
+    MOTO3_RIDERS,
+    MOTOGP_RIDERS,
+  } = await import('./types');
+
+  const step0 = getTitleAnthemStepSpec(0);
+  assert.equal(step0.crashCymbal, true);
+  assert.equal(step0.kick, true);
+  assert.ok(step0.leadHz !== null && step0.bassHz > 0 && step0.ostinatoHz > 0);
+
+  let leadCount = 0;
+  for (let i = 0; i < 64; i++) {
+    const spec = getTitleAnthemStepSpec(i);
+    if (spec.leadHz !== null) leadCount++;
+  }
+  assert.ok(leadCount >= 16);
+
+  for (const r of [...MOTO3_RIDERS, ...MOTO2_RIDERS, ...MOTOGP_RIDERS]) {
+    assert.ok(COUNTRY_NAMES[r.nationality], `missing country mapping for ${r.riderName}`);
+    const face = getRiderFaceStyle(r);
+    assert.ok(face.skinHex.startsWith('#') && face.hairHex.startsWith('#'));
+  }
+});
+
+test('crash isolation ensures uninvolved AI riders maintain full race pace when another bike crashes ahead', () => {
+  const circuit = getCircuit('lusail');
+  const crashedBike = createInitialBikeState({
+    id: 'crashed-rider',
+    name: 'Crashed Rider',
+    livery: TEAM_LIVERIES[0],
+    bikeClass: 'motogp',
+    slotIndex: 0,
+    circuit,
+    isPlayer: true,
+    isRemote: false,
+    isAi: false,
+  });
+  const passingAi = createInitialBikeState({
+    id: 'passing-ai',
+    name: 'Passing AI',
+    livery: TEAM_LIVERIES[1],
+    bikeClass: 'motogp',
+    slotIndex: 1,
+    circuit,
+    isPlayer: false,
+    isRemote: false,
+    isAi: true,
+    aiPaceFactor: 1.0,
+  });
+  const trailingAi = createInitialBikeState({
+    id: 'trailing-ai',
+    name: 'Trailing AI',
+    livery: TEAM_LIVERIES[2],
+    bikeClass: 'motogp',
+    slotIndex: 2,
+    circuit,
+    isPlayer: false,
+    isRemote: false,
+    isAi: true,
+    aiPaceFactor: 1.0,
+  });
+
+  // Put crashed rider 14m ahead of passingAi in the same lane on a straight
+  const smpAhead = sampleTrackAtS(circuit, START_LINE_S + 200);
+  crashedBike.x = smpAhead.x;
+  crashedBike.z = smpAhead.z;
+  crashedBike.trackS = smpAhead.s;
+  crashedBike.heading = Math.atan2(smpAhead.tx, smpAhead.tz);
+  crashedBike.speed = 35;
+  triggerBikeCrash(crashedBike, 1);
+  assert.equal(crashedBike.crashed, true);
+
+  const smpBehind = sampleTrackAtS(circuit, START_LINE_S + 186);
+  passingAi.x = smpBehind.x;
+  passingAi.z = smpBehind.z;
+  passingAi.trackS = smpBehind.s;
+  passingAi.heading = Math.atan2(smpBehind.tx, smpBehind.tz);
+  passingAi.speed = 65;
+
+  const smpFar = sampleTrackAtS(circuit, START_LINE_S + 130);
+  trailingAi.x = smpFar.x;
+  trailingAi.z = smpFar.z;
+  trailingAi.trackS = smpFar.s;
+  trailingAi.heading = Math.atan2(smpFar.tx, smpFar.tz);
+  trailingAi.speed = 65;
+
+  const inputPassing = computeAiInput(passingAi, circuit, [crashedBike, passingAi, trailingAi]);
+  // Passing AI keeps full throttle to sweep cleanly around the crashed bike without global braking!
+  assert.equal(inputPassing.throttle, 1);
+  assert.equal(inputPassing.brake, 0);
+
+  // Step physics for all 3 bikes: crashed bike slows heavily while uninvolved AIs keep full speed
+  const startSpeedPassing = passingAi.speed;
+  const startSpeedTrailing = trailingAi.speed;
+  for (let i = 0; i < 25; i++) {
+    stepBikePhysics(crashedBike, { throttle: 0, brake: 0, steer: 0, boost: false }, 0.04, circuit, 8000 + i * 40, 3, true);
+    const inP = computeAiInput(passingAi, circuit, [crashedBike, passingAi, trailingAi]);
+    const inT = computeAiInput(trailingAi, circuit, [crashedBike, passingAi, trailingAi]);
+    stepBikePhysics(passingAi, inP, 0.04, circuit, 8000 + i * 40, 3, true);
+    stepBikePhysics(trailingAi, inT, 0.04, circuit, 8000 + i * 40, 3, true);
+  }
+  assert.ok(crashedBike.speed < 25, `crashed bike loses speed (${crashedBike.speed})`);
+  assert.ok(passingAi.speed >= startSpeedPassing, `passing AI should accelerate/maintain pace (${passingAi.speed} vs ${startSpeedPassing})`);
+  assert.ok(trailingAi.speed >= startSpeedTrailing, 'trailing AI unaffected by another rider crash');
+});
+
+test('male commentary voice picker selects male English voice and produces humanized Marco Bellini script', async () => {
+  const { pickMaleEnglishVoice, buildPreRaceCommentary } = await import('./commentary');
+
+  const voices = [
+    { name: 'Samantha', lang: 'en-US', default: true },
+    { name: 'Google US English', lang: 'en-US', default: false },
+    { name: 'Microsoft Zira Desktop', lang: 'en-US', default: false },
+    { name: 'Daniel', lang: 'en-GB', default: false },
+    { name: 'Arthur', lang: 'en-GB', default: false },
+  ];
+  const picked = pickMaleEnglishVoice(voices);
+  assert.ok(picked && (picked.name === 'Daniel' || picked.name === 'Arthur'), `expected male UK voice, got ${picked?.name}`);
+
+  const pre = buildPreRaceCommentary({
+    circuitId: 'lusail',
+    bikeClass: 'motogp',
+    sessionType: 'race',
+    playerLivery: TEAM_LIVERIES[0],
+    playerGridPos: 1,
+    totalRiders: 22,
+    weatherPhase: 'clear',
+  });
+  assert.ok(pre.caster.includes('Marco Bellini'));
+  assert.ok(pre.lines.join(' ').includes('green flags'));
+});
+
+test('3D rider rig includes head, ears, eyes, nose, mouth, body, 5-finger hands gripping handlebars via IK, and animated feet', async () => {
+  const THREE = await import('three');
+  const { solveRiderArmIK, createMotoBikeRig, animateBikeRiderPose, createStandingRiderMesh } = await import('./bikeMesh');
+
+  // 1. Verify exact 2-bone analytical arm IK solution error < 1e-4
+  const solved = solveRiderArmIK(1, new THREE.Vector3(0.192, 0.41, 0.07), new THREE.Vector3(0.24, 0.06, 0.44));
+  assert.ok(solved.wristLocalError < 1e-4, `IK error too high: ${solved.wristLocalError}`);
+
+  // 2. Build full bike + rider rig & standing podium rider with a minimal canvas stub for Node
+  const origDoc = (globalThis as { document?: unknown }).document;
+  const noopCtx = new Proxy(
+    {},
+    {
+      get: (_t, prop) => {
+        if (prop === 'createLinearGradient' || prop === 'createRadialGradient') {
+          return () => ({ addColorStop: () => {} });
+        }
+        if (prop === 'measureText') return () => ({ width: 20 });
+        return () => {};
+      },
+      set: () => true,
+    },
+  );
+  (globalThis as { document: unknown }).document = {
+    createElement: () => ({
+      width: 256,
+      height: 256,
+      getContext: () => noopCtx,
+    }),
+  };
+
+  try {
+    const tex = new THREE.Texture();
+    const rig = createMotoBikeRig(TEAM_LIVERIES[0], tex, false, 'motogp');
+
+    const names = new Set<string>();
+    rig.root.traverse((o) => {
+      if (o.name) names.add(o.name);
+    });
+
+    for (const required of [
+      'head',
+      'earL',
+      'earR',
+      'eyeL',
+      'eyeR',
+      'nose',
+      'mouth',
+      'bodyTorso',
+      'bodyChest',
+      'leftHand',
+      'rightHand',
+      'leftThumb',
+      'rightThumb',
+      'left_finger_index',
+      'left_finger_middle',
+      'left_finger_ring',
+      'left_finger_pinky',
+      'right_finger_index',
+      'right_finger_pinky',
+      'leftFoot',
+      'rightFoot',
+    ]) {
+      assert.ok(names.has(required), `missing required 3D anatomical part: ${required}`);
+    }
+
+    // Animate riding pose with steering & verify hands stay locked to clip-on handlebars!
+    rig.frontForkGroup.rotation.y = -0.25 * 0.45;
+    animateBikeRiderPose(rig, {
+      speed: 55,
+      leanAngle: 0.45,
+      steerVisual: 0.25,
+      gear: 1,
+      brake: 0,
+      isBoosting: false,
+      crashed: false,
+      preRaceIdle: false,
+      timeSec: 1.0,
+      riderSeed: 1,
+      dt: 0.05,
+    });
+    rig.root.updateMatrixWorld(true);
+
+    const worldLeftHand = new THREE.Vector3();
+    const worldLeftGrip = rig.leftGripAnchor.clone().applyMatrix4(rig.frontForkGroup.matrixWorld);
+    rig.riderJoints.leftArm.wristPivot.getWorldPosition(worldLeftHand);
+    const leftDist = worldLeftHand.distanceTo(worldLeftGrip);
+    assert.ok(leftDist < 0.025, `left hand detached from handlebar grip: dist=${leftDist}`);
+
+    const worldRightHand = new THREE.Vector3();
+    const worldRightGrip = rig.rightGripAnchor.clone().applyMatrix4(rig.frontForkGroup.matrixWorld);
+    rig.riderJoints.rightArm.wristPivot.getWorldPosition(worldRightHand);
+    const rightDist = worldRightHand.distanceTo(worldRightGrip);
+    assert.ok(rightDist < 0.025, `right hand detached from handlebar grip: dist=${rightDist}`);
+
+    // Trigger gear shift and advance cleanly into mid-shift ankle flexion
+    for (let k = 0; k < 3; k++) {
+      animateBikeRiderPose(rig, {
+        speed: 60,
+        leanAngle: 0,
+        steerVisual: 0,
+        gear: 2,
+        brake: 0,
+        isBoosting: false,
+        crashed: false,
+        preRaceIdle: false,
+        timeSec: 1.05 + k * 0.04,
+        riderSeed: 1,
+        dt: 0.04,
+      });
+    }
+    assert.ok(
+      Math.abs(rig.riderJoints.leftLeg.footPivot.rotation.x) > 0.05,
+      `left foot should animate on gear shift (${rig.riderJoints.leftLeg.footPivot.rotation.x})`,
+    );
+
+    const podiumRider = createStandingRiderMesh(TEAM_LIVERIES[0]);
+    const podiumNames = new Set<string>();
+    podiumRider.root.traverse((o) => {
+      if (o.name) podiumNames.add(o.name);
+    });
+    assert.ok(podiumNames.has('head') && podiumNames.has('mouth') && podiumNames.has('leftFoot') && podiumNames.has('rightHand'));
+
+    rig.dispose();
+    podiumRider.dispose();
+    tex.dispose();
+  } finally {
+    if (origDoc === undefined) {
+      delete (globalThis as { document?: unknown }).document;
+    } else {
+      (globalThis as { document?: unknown }).document = origDoc;
+    }
+  }
+});
+
+
+
+

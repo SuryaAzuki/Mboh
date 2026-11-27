@@ -2,13 +2,16 @@ import React, { useEffect, useState } from 'react';
 import { CIRCUIT_LIST } from '../game/trackMath';
 import {
   BIKE_CLASSES,
-  TEAM_LIVERIES,
+  COUNTRY_NAMES,
+  getClassLiveries,
+  getLiveryById,
   type BikeClassId,
   type CircuitId,
   type LanRoomState,
   type TeamLivery,
 } from '../game/types';
 import type { OpenRoomSummary } from '../net/lanClient';
+import { NationalFlag, RiderMiniFace } from './RiderAvatarBadge';
 
 interface LanInfoResponse {
   port: number;
@@ -91,7 +94,9 @@ export const LanLobbyModal: React.FC<LanLobbyModalProps> = ({
 
   const isHost = Boolean(room && clientId && room.hostId === clientId);
   const localPlayer = room?.players.find((p) => p.id === clientId);
-  const activeRoomClass = room ? BIKE_CLASSES[room.bikeClass ?? 'motogp'] : BIKE_CLASSES[preferredClass];
+  const activeClassId: BikeClassId = room?.bikeClass ?? preferredClass;
+  const activeRoomClass = BIKE_CLASSES[activeClassId];
+  const classLiveries = getClassLiveries(activeClassId);
 
   return (
     <div
@@ -100,9 +105,11 @@ export const LanLobbyModal: React.FC<LanLobbyModalProps> = ({
       aria-modal="true"
       aria-label="LAN Multiplayer Lobby"
     >
-      <div className="w-full max-w-3xl bg-[#0b101b] border border-slate-700 rounded-2xl p-6 shadow-2xl max-h-[92vh] overflow-y-auto">
+      <div className="w-full max-w-3xl bg-gradient-to-b from-[#121a2d] to-[#0a0f1b] border border-cyan-500/40 rounded-2xl overflow-hidden shadow-2xl max-h-[92vh] flex flex-col">
+        <div className="moto-stripe-bar h-1.5 w-full shrink-0" />
+        <div className="p-6 overflow-y-auto">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-slate-800 pb-4 mb-5">
+        <div className="flex items-center justify-between border-b border-slate-700/70 pb-4 mb-5">
           <div>
             <div className="flex items-center gap-2.5">
               <h2 className="text-xl font-black italic uppercase tracking-wide text-white">
@@ -184,23 +191,26 @@ export const LanLobbyModal: React.FC<LanLobbyModalProps> = ({
             </div>
 
             <div>
-              <div className="flex items-center justify-between text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
-                <span>Factory Bike</span>
-                <span className="text-slate-200">{selectedLivery.name}</span>
+              <div className="flex items-center justify-between text-[11px] font-bold uppercase tracking-wider text-cyan-300 mb-1.5">
+                <span>{activeRoomClass.label} Rider</span>
+                <span className="text-slate-100 flex items-center gap-1.5">
+                  <NationalFlag code={selectedLivery.nationality} size="xs" />
+                  <span>{selectedLivery.riderName}</span>
+                </span>
               </div>
               <div className="grid grid-cols-6 gap-1.5">
-                {TEAM_LIVERIES.map((liv) => (
+                {classLiveries.map((liv) => (
                   <button
                     key={liv.id}
                     type="button"
                     onClick={() => onSelectLivery(liv)}
                     className={`h-8 rounded border-2 text-[11px] font-bold text-white cursor-pointer ${
                       selectedLivery.id === liv.id
-                        ? 'border-white scale-105'
-                        : 'border-slate-700 opacity-75 hover:opacity-100'
+                        ? 'border-amber-300 scale-105'
+                        : 'border-slate-700 opacity-80 hover:opacity-100'
                     }`}
                     style={{ backgroundColor: liv.primaryHex }}
-                    title={liv.name}
+                    title={`${liv.riderName} (${COUNTRY_NAMES[liv.nationality]})`}
                   >
                     {liv.number}
                   </button>
@@ -408,24 +418,25 @@ export const LanLobbyModal: React.FC<LanLobbyModalProps> = ({
                 {/* Rider Roster */}
                 <div className="space-y-2 max-h-56 overflow-y-auto">
                   {room.players.map((p) => {
-                    const liv = TEAM_LIVERIES.find((l) => l.id === p.liveryId) ?? TEAM_LIVERIES[0];
+                    const liv = getLiveryById(p.liveryId, activeClassId);
                     return (
                       <div
                         key={p.id}
                         className="flex items-center justify-between px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-800"
                       >
-                        <div className="flex items-center gap-3">
-                          <span
-                            className="w-7 h-7 rounded-md text-xs font-black text-white flex items-center justify-center"
-                            style={{ backgroundColor: liv.primaryHex }}
-                          >
-                            {liv.number}
-                          </span>
+                        <div className="flex items-center gap-2.5">
+                          <RiderMiniFace livery={liv} size="sm" showFlag />
                           <div>
-                            <div className="font-bold text-sm text-white leading-tight">
-                              {p.name}
+                            <div className="font-bold text-sm text-white leading-tight flex items-center gap-1.5">
+                              <span>{p.name}</span>
+                              <span
+                                className="px-1 rounded text-[9px] font-black text-white tabular-nums"
+                                style={{ backgroundColor: liv.primaryHex }}
+                              >
+                                #{liv.number}
+                              </span>
                               {p.id === clientId && (
-                                <span className="text-xs text-sky-400 ml-1.5">(You)</span>
+                                <span className="text-xs text-sky-400">(You)</span>
                               )}
                             </div>
                             <div className="text-[11px] text-slate-400">{liv.name}</div>
@@ -478,7 +489,7 @@ export const LanLobbyModal: React.FC<LanLobbyModalProps> = ({
                       <button
                         type="button"
                         onClick={onStartRace}
-                        className="px-6 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-black text-sm uppercase tracking-wider cursor-pointer shadow-lg"
+                        className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-[#e10600] to-[#f97316] hover:from-[#ef4444] hover:to-[#fb923c] text-white font-black text-sm uppercase tracking-wider cursor-pointer shadow-lg"
                       >
                         Start LAN Race
                       </button>
@@ -488,6 +499,7 @@ export const LanLobbyModal: React.FC<LanLobbyModalProps> = ({
               </div>
             )}
           </div>
+        </div>
         </div>
       </div>
     </div>

@@ -15,10 +15,12 @@ import {
   BIKE_CLASSES,
   type BikeClassId,
   type BikeState,
+  type RainPatch,
   type RiderInput,
   type SolidCollider,
   type TeamLivery,
 } from './types';
+import { evaluateRainPatchAt, findNearestRainPatchAhead } from './weather';
 
 export const MAX_SPEED_MS = 88; // ~317 km/h MotoGP top speed
 export const BOOST_TOP_SPEED_MS = 97; // ~349 km/h KERS slipstream boost
@@ -90,6 +92,7 @@ export function createInitialBikeState(params: {
     isBoosting: false,
     inSlipstream: false,
     surface: 'asphalt',
+    onRainPatch: false,
     trackS: slot.trackS,
     trackOffset: slot.offset,
     lap: 1,
@@ -102,9 +105,21 @@ export function createInitialBikeState(params: {
     topSpeedKmh: 0,
     rank: params.slotIndex + 1,
     crashed: false,
+    crashType: null,
+    crashAge: 0,
     crashTimer: 0,
     crashSlideYaw: 0,
     crashDirSign: 1,
+    bikeBounceY: 0,
+    riderCrashX: 0,
+    riderCrashY: 0.79,
+    riderCrashZ: -0.19,
+    riderCrashVx: 0,
+    riderCrashVy: 0,
+    riderCrashVz: 0,
+    riderCrashSpinX: 0,
+    riderCrashSpinY: 0,
+    riderCrashSpinZ: 0,
     recoveryGraceTimer: 0,
     aiTargetOffset: ((params.slotIndex % 3) - 1) * 1.4,
     aiPassOffset: 0,
@@ -113,13 +128,47 @@ export function createInitialBikeState(params: {
   };
 }
 
-export function triggerBikeCrash(bike: BikeState, dirSign?: 1 | -1): boolean {
+export function triggerBikeCrash(
+  bike: BikeState,
+  dirSign?: 1 | -1,
+  crashType?: 'lowside' | 'highside',
+): boolean {
   if (bike.crashed || bike.finished || bike.recoveryGraceTimer > 0) return false;
+  const resolvedDir: 1 | -1 = dirSign ?? (bike.leanAngle >= 0 ? 1 : -1);
+  const resolvedType: 'lowside' | 'highside' = crashType ?? 'lowside';
   bike.crashed = true;
-  bike.crashTimer = 2.05;
-  bike.crashDirSign = dirSign ?? (bike.leanAngle >= 0 ? 1 : -1);
+  bike.crashType = resolvedType;
+  bike.crashAge = 0;
+  bike.crashTimer = resolvedType === 'highside' ? 2.45 : 2.05;
+  bike.crashDirSign = resolvedDir;
   bike.crashSlideYaw = 0;
+  bike.bikeBounceY = resolvedType === 'highside' ? 0.35 : 0;
   bike.isBoosting = false;
+
+  if (resolvedType === 'highside') {
+    // Violent high-side: rear snaps and catapults rider up and forward into airborne ragdoll flip
+    bike.riderCrashX = -resolvedDir * 0.18;
+    bike.riderCrashY = 0.95;
+    bike.riderCrashZ = 0.05;
+    bike.riderCrashVx = resolvedDir * (1.8 + Math.min(2.2, bike.speed * 0.03));
+    bike.riderCrashVy = 6.2 + Math.min(2.4, bike.speed * 0.045);
+    bike.riderCrashVz = 3.6 + Math.min(3.4, bike.speed * 0.06);
+    bike.riderCrashSpinX = 6.8;
+    bike.riderCrashSpinY = resolvedDir * 3.4;
+    bike.riderCrashSpinZ = -resolvedDir * 5.2;
+    bike.leanAngle = -resolvedDir * 0.45;
+  } else {
+    // Low-side washout: rider drops low onto hip/shoulder alongside the sliding bike
+    bike.riderCrashX = -resolvedDir * 0.35;
+    bike.riderCrashY = 0.62;
+    bike.riderCrashZ = -0.22;
+    bike.riderCrashVx = -resolvedDir * (2.6 + Math.min(1.6, bike.speed * 0.025));
+    bike.riderCrashVy = 1.4;
+    bike.riderCrashVz = -0.85;
+    bike.riderCrashSpinX = 1.4;
+    bike.riderCrashSpinY = resolvedDir * 2.2;
+    bike.riderCrashSpinZ = resolvedDir * 2.8;
+  }
   return true;
 }
 
@@ -137,9 +186,22 @@ export function resetBikeToTrack(bike: BikeState, circuit: CircuitData): void {
   bike.isBoosting = false;
   bike.inSlipstream = false;
   bike.surface = 'asphalt';
+  bike.onRainPatch = false;
   bike.crashed = false;
+  bike.crashType = null;
+  bike.crashAge = 0;
   bike.crashTimer = 0;
   bike.crashSlideYaw = 0;
+  bike.bikeBounceY = 0;
+  bike.riderCrashX = 0;
+  bike.riderCrashY = 0.79;
+  bike.riderCrashZ = -0.19;
+  bike.riderCrashVx = 0;
+  bike.riderCrashVy = 0;
+  bike.riderCrashVz = 0;
+  bike.riderCrashSpinX = 0;
+  bike.riderCrashSpinY = 0;
+  bike.riderCrashSpinZ = 0;
   bike.recoveryGraceTimer = 2.2;
 }
 
@@ -165,6 +227,7 @@ export function computeAiInput(
   bike: BikeState,
   circuit: CircuitData,
   allBikes: BikeState[],
+  rainPatches: RainPatch[] = [],
 ): RiderInput {
   if (bike.finished || bike.crashed) {
     return { throttle: bike.finished ? 0.25 : 0, brake: bike.finished ? 0.3 : 0, steer: 0, boost: false };
@@ -194,6 +257,7 @@ export function computeAiInput(
   let closestAheadDist = Infinity;
   let aheadBike: BikeState | null = null;
   let sideRepel = 0;
+  let avoidingCrash = false;
 
   for (const other of allBikes) {
     if (other.id === bike.id) continue;
@@ -202,14 +266,21 @@ export function computeAiInput(
 
     const dLat = other.trackOffset - bike.trackOffset;
 
-    // Avoid crashed bikes on track early + maintain clean wheel-to-wheel spacing
-    const dangerRange = other.crashed ? 18 : 4.2;
-    const dangerLat = other.crashed ? 3.4 : 2.5;
-    if (ds > -2 && ds < dangerRange && Math.abs(dLat) < dangerLat) {
+    if (other.crashed) {
+      // Smoothly change lanes well ahead of a crashed bike without decelerating the pack
+      if (ds > 0 && ds < 26 && Math.abs(dLat) < 2.4) {
+        sideRepel += dLat >= 0 ? -3.2 : 3.2;
+        avoidingCrash = true;
+      }
+      continue;
+    }
+
+    // Maintain clean wheel-to-wheel spacing with active riders
+    if (ds > -2 && ds < 4.2 && Math.abs(dLat) < 2.5) {
       sideRepel += dLat >= 0 ? -2.4 : 2.4;
     }
 
-    if (!other.crashed && ds > 1.5 && ds < 46 && Math.abs(dLat) < 3.4) {
+    if (ds > 1.5 && ds < 46 && Math.abs(dLat) < 3.4) {
       if (ds < closestAheadDist) {
         closestAheadDist = ds;
         aheadBike = other;
@@ -217,7 +288,7 @@ export function computeAiInput(
     }
 
     // Aggressively defend inside apex when rival is close behind
-    if (!other.crashed && ds < -1.6 && ds > -16 && Math.abs(dLat) < 2.6 && Math.abs(midCurv) > 0.0028) {
+    if (ds < -1.6 && ds > -16 && Math.abs(dLat) < 2.6 && Math.abs(midCurv) > 0.0028) {
       defending = true;
     }
   }
@@ -273,11 +344,24 @@ export function computeAiInput(
       : 0;
   const defendBias = defending && Math.abs(midCurv) > 0.0028 ? Math.sign(midCurv) * 1.4 : 0;
 
+  // Dynamic rain patch hazard dodge: shift racing line onto the drier side of track
+  const rainAhead = findNearestRainPatchAhead(circuit, bike.trackS, 70 + bike.speed * 0.65, rainPatches);
+  let rainDodgeOffset = 0;
+  let rainGripPenalty = 1.0;
+  if (rainAhead && !offTrack) {
+    const patchEndClear = Math.abs(bike.trackOffset - rainAhead.lateralCenter) < rainAhead.radiusLat + 1.6;
+    const drySide = rainAhead.lateralCenter >= 0 ? -4.8 : 4.8;
+    if (patchEndClear) {
+      rainDodgeOffset = drySide - (bike.aiTargetOffset * 0.35 + apexBias);
+    }
+    rainGripPenalty = 0.84;
+  }
+
   let rawDesiredOffset = 0;
   if (!offTrack) {
     rawDesiredOffset = overtaking
-      ? bike.aiPassOffset + sideRepel
-      : bike.aiTargetOffset * 0.35 + apexBias + defendBias + sideRepel;
+      ? bike.aiPassOffset + sideRepel + rainDodgeOffset * 0.45
+      : bike.aiTargetOffset * 0.35 + apexBias + defendBias + sideRepel + rainDodgeOffset;
   }
 
   const desiredOffset = Math.max(-safeHalfWidth, Math.min(safeHalfWidth, rawDesiredOffset));
@@ -294,13 +378,19 @@ export function computeAiInput(
   // AI skill (aiPaceFactor) strictly sets cornering braking/grip precision, never engine power.
   const spec = BIKE_CLASSES[bike.bikeClass];
   const cornerSkill = Math.max(0.9, Math.min(1.04, bike.aiPaceFactor));
-  const lateralGrip = 33.5 * spec.handlingMultiplier * cornerSkill;
+  const lateralGrip = 33.5 * spec.handlingMultiplier * cornerSkill * rainGripPenalty;
   const cornerSpeedLimit =
     peakCurv > 0.0028
       ? Math.max(22, Math.min(spec.topSpeedMs, Math.sqrt(lateralGrip / peakCurv)))
       : spec.topSpeedMs;
 
-  const alignmentSlowdown = Math.abs(angleErr) > 0.42 ? 0.82 : Math.abs(angleErr) > 0.24 ? 0.94 : 1.0;
+  const alignmentSlowdown = avoidingCrash
+    ? 1.0
+    : Math.abs(angleErr) > 0.42
+    ? 0.82
+    : Math.abs(angleErr) > 0.24
+    ? 0.94
+    : 1.0;
   const targetSpeed =
     peakCurv <= 0.0028
       ? spec.topSpeedMs * alignmentSlowdown
@@ -472,6 +562,8 @@ export function stepBikePhysics(
   totalLaps: number,
   canMove: boolean,
   solidColliders: SolidCollider[] = [],
+  rainPatches: RainPatch[] = [],
+  rainIntensity = 0,
 ): StepResult {
   const prevGear = bike.gear;
   const prevLapProgress = getLapProgressS(bike.trackS, circuit.totalLength);
@@ -497,17 +589,54 @@ export function stepBikePhysics(
     bike.recoveryGraceTimer = Math.max(0, bike.recoveryGraceTimer - dt);
   }
 
-  // Handle active crash tumble / slide before auto-recovery
+  // Handle active low-side slide OR high-side airborne ragdoll & bounce before auto-recovery
   if (bike.crashed) {
     bike.crashTimer -= dt;
+    bike.crashAge += dt;
     bike.isBoosting = false;
-    const slideDecel = bike.surface === 'gravel' || bike.surface === 'grass' ? 24 : 15;
+    const isHighside = bike.crashType === 'highside';
+    const slideDecel = bike.surface === 'gravel' || bike.surface === 'grass' ? 24 : isHighside ? 18 : 15;
     bike.speed = Math.max(0, bike.speed - slideDecel * dt);
 
-    // Tip motorcycle onto its side and spin slightly as rider & bike slide
-    const targetCrashLean = bike.crashDirSign * 1.36;
-    bike.leanAngle += (targetCrashLean - bike.leanAngle) * Math.min(1, dt * 11);
-    bike.crashSlideYaw += bike.crashDirSign * dt * (1.1 + bike.speed * 0.06);
+    if (isHighside) {
+      // Bike whips past upright to opposite side with damped chassis hop
+      const targetCrashLean = -bike.crashDirSign * 1.44;
+      bike.leanAngle += (targetCrashLean - bike.leanAngle) * Math.min(1, dt * 8.5);
+      bike.crashSlideYaw -= bike.crashDirSign * dt * (1.8 + bike.speed * 0.08);
+      bike.bikeBounceY =
+        bike.crashAge < 0.72
+          ? Math.abs(Math.sin(bike.crashAge * Math.PI * 2.2)) * 0.45 * (1 - bike.crashAge / 0.72)
+          : 0;
+    } else {
+      // Low-side: bike drops smoothly onto inside fairing and slides cleanly
+      const targetCrashLean = bike.crashDirSign * 1.36;
+      bike.leanAngle += (targetCrashLean - bike.leanAngle) * Math.min(1, dt * 11);
+      bike.crashSlideYaw += bike.crashDirSign * dt * (1.1 + bike.speed * 0.06);
+      bike.bikeBounceY = 0;
+    }
+
+    // Step rider fall / ragdoll kinematics (gravity + ground restitution bounce + ground skid damping)
+    const gravity = 18.5;
+    const groundHeight = 0.24;
+    bike.riderCrashVy -= gravity * dt;
+    bike.riderCrashX += bike.riderCrashVx * dt;
+    bike.riderCrashY += bike.riderCrashVy * dt;
+    bike.riderCrashZ += bike.riderCrashVz * dt;
+
+    if (bike.riderCrashY <= groundHeight) {
+      bike.riderCrashY = groundHeight;
+      if (bike.riderCrashVy < -1.1) {
+        bike.riderCrashVy = -bike.riderCrashVy * (isHighside ? 0.36 : 0.16);
+      } else {
+        bike.riderCrashVy = 0;
+      }
+      const friction = Math.exp(-5.4 * dt);
+      bike.riderCrashVx *= friction;
+      bike.riderCrashVz *= friction;
+      bike.riderCrashSpinX *= Math.exp(-4.8 * dt);
+      bike.riderCrashSpinY *= Math.exp(-4.8 * dt);
+      bike.riderCrashSpinZ *= Math.exp(-4.8 * dt);
+    }
 
     bike.x += Math.sin(bike.heading) * bike.speed * dt;
     bike.z += Math.cos(bike.heading) * bike.speed * dt;
@@ -572,6 +701,12 @@ export function stepBikePhysics(
     bike.speed -= effectiveInput.brake * brakePower * dt;
   }
 
+  const wetEval =
+    bike.surface === 'asphalt' || bike.surface === 'curb'
+      ? evaluateRainPatchAt(circuit, bike.trackS, bike.trackOffset, rainPatches)
+      : { onPatch: false, wetness: 0, dodgeOffsetSign: 0 };
+  bike.onRainPatch = wetEval.onPatch;
+
   const aeroDrag = (bike.inSlipstream ? 0.0016 : 0.0022) * bike.speed * bike.speed;
   const rollingDrag = 1.6;
   let surfaceDrag = 0;
@@ -585,6 +720,8 @@ export function stepBikePhysics(
   } else if (bike.surface === 'grass') {
     surfaceDrag = 16.0 + bike.speed * 0.4;
     surfaceMaxSpeed = 38;
+  } else if (wetEval.onPatch) {
+    surfaceDrag = (7.2 + bike.speed * 0.19) * wetEval.wetness;
   }
 
   const leanDrag = Math.abs(bike.leanAngle) * 3.5;
@@ -596,8 +733,15 @@ export function stepBikePhysics(
   bike.leanAngle += (targetLean - bike.leanAngle) * Math.min(1, dt * 8.5 * spec.handlingMultiplier);
   bike.steerVisual += (effectiveInput.steer * 0.35 - bike.steerVisual) * Math.min(1, dt * 10);
 
+  const wetAmbientFactor = Math.max(0.88, 1 - rainIntensity * 0.1);
   const gripMultiplier =
-    bike.surface === 'gravel' ? 0.55 : bike.surface === 'grass' ? 0.65 : 1.0;
+    bike.surface === 'gravel'
+      ? 0.55
+      : bike.surface === 'grass'
+      ? 0.65
+      : wetEval.onPatch
+      ? 0.64 * wetAmbientFactor
+      : wetAmbientFactor;
   const highSpeedStability = 1.0 / (1.0 + bike.speed * 0.011);
   const yawRate = -bike.leanAngle * 2.15 * spec.handlingMultiplier * steerFactor * gripMultiplier * highSpeedStability;
   bike.heading = normalizeAngle(bike.heading + yawRate * dt);
@@ -609,14 +753,20 @@ export function stepBikePhysics(
   // Enforce solid collisions against Tribuns, Buildings, Walls, Pillars & Guardrails
   const solidImpact = resolveSolidCollisions(bike, solidColliders, circuit);
 
-  // Trigger crash on heavy wall/barrier impact OR gravel/braking washout at extreme lean
+  // Trigger distinct High-Side vs Low-Side crashes:
+  // - High-side: heavy solid wall/barrier collision OR sudden wet/throttle rear snapback
+  // - Low-side: front washout under high lean in gravel, grass, wet patches, or hard trail braking
   if (!bike.finished && bike.recoveryGraceTimer <= 0) {
     if (solidImpact && solidImpact.intensity >= 0.44) {
-      justCrashed = triggerBikeCrash(bike);
+      justCrashed = triggerBikeCrash(bike, undefined, 'highside');
     } else if ((bike.surface === 'gravel' || bike.surface === 'grass') && Math.abs(bike.leanAngle) > 0.62 && bike.speed > 34) {
-      justCrashed = triggerBikeCrash(bike);
+      justCrashed = triggerBikeCrash(bike, undefined, 'lowside');
+    } else if (wetEval.onPatch && effectiveInput.throttle > 0.8 && Math.abs(bike.leanAngle) > 0.66 && bike.speed > 42) {
+      justCrashed = triggerBikeCrash(bike, undefined, 'highside');
+    } else if (wetEval.onPatch && (Math.abs(bike.leanAngle) > 0.6 || (effectiveInput.brake > 0.78 && Math.abs(bike.leanAngle) > 0.44)) && bike.speed > 36) {
+      justCrashed = triggerBikeCrash(bike, undefined, 'lowside');
     } else if (effectiveInput.brake > 0.85 && Math.abs(bike.leanAngle) > 0.72 && bike.speed > 40) {
-      justCrashed = triggerBikeCrash(bike);
+      justCrashed = triggerBikeCrash(bike, undefined, 'lowside');
     }
   }
 
@@ -634,6 +784,10 @@ export function stepBikePhysics(
   bike.trackS = proj.s;
   bike.trackOffset = proj.offset;
   bike.surface = proj.surface;
+  bike.onRainPatch =
+    proj.surface === 'asphalt' || proj.surface === 'curb'
+      ? evaluateRainPatchAt(circuit, bike.trackS, bike.trackOffset, rainPatches).onPatch
+      : false;
 
   const newLapProgress = getLapProgressS(bike.trackS, circuit.totalLength);
   const lapState = updateLapAndCheckpoints(
@@ -735,7 +889,8 @@ export function resolveBikeCollisions(bikes: BikeState[]): BikeCollisionImpact[]
           a.z -= nz * overlap;
           a.speed *= 0.94;
           if (severeContact && (a.speed <= b.speed || Math.abs(a.leanAngle) > 0.55)) {
-            if (triggerBikeCrash(a, a.leanAngle >= 0 ? 1 : -1)) crashedIds.push(a.id);
+            const cType = relSpeed > 22 ? 'highside' : 'lowside';
+            if (triggerBikeCrash(a, a.leanAngle >= 0 ? 1 : -1, cType)) crashedIds.push(a.id);
           }
         }
         if (!b.isRemote) {
@@ -743,7 +898,8 @@ export function resolveBikeCollisions(bikes: BikeState[]): BikeCollisionImpact[]
           b.z += nz * overlap;
           b.speed *= 0.94;
           if (severeContact && (b.speed <= a.speed || Math.abs(b.leanAngle) > 0.55)) {
-            if (triggerBikeCrash(b, b.leanAngle >= 0 ? 1 : -1)) crashedIds.push(b.id);
+            const cType = relSpeed > 22 ? 'highside' : 'lowside';
+            if (triggerBikeCrash(b, b.leanAngle >= 0 ? 1 : -1, cType)) crashedIds.push(b.id);
           }
         }
 
@@ -767,3 +923,27 @@ export function updateRaceRankings(bikes: BikeState[]): void {
     bike.rank = idx + 1;
   });
 }
+
+export const DEFAULT_STEERING_SENSITIVITY = 0.6;
+
+export function clampSteeringSensitivity(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_STEERING_SENSITIVITY;
+  return Math.max(0.25, Math.min(1.2, Math.round(value * 100) / 100));
+}
+
+export function computeSteerInputStep(
+  rawSteer: number,
+  currentSteer: number,
+  sensitivity: number,
+  dt: number,
+): number {
+  const sens = clampSteeringSensitivity(sensitivity);
+  const clampedRaw = Math.max(-1, Math.min(1, rawSteer));
+  const target = clampedRaw * sens;
+  const isReturning = Math.abs(clampedRaw) < 0.05;
+  const rate = isReturning ? 11.0 + sens * 4.5 : 4.2 + sens * 7.5;
+  const alpha = 1 - Math.exp(-rate * Math.max(0.001, dt));
+  const next = currentSteer + (target - currentSteer) * alpha;
+  return Math.abs(next) < 0.004 && isReturning ? 0 : next;
+}
+

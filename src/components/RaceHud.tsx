@@ -1,6 +1,13 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { getLeaderboardPageSlice, LEADERBOARD_CYCLE_MS } from '../game/leaderboard';
 import { buildMinimapGeometry, projectPointToMinimap } from '../game/trackMath';
-import { type CameraMode, type CircuitId, type HudSnapshot } from '../game/types';
+import {
+  getLiveryById,
+  type CameraMode,
+  type CircuitId,
+  type HudSnapshot,
+} from '../game/types';
+import { NationalFlag, RiderMiniFace } from './RiderAvatarBadge';
 
 interface RaceHudProps {
   hud: HudSnapshot;
@@ -39,7 +46,23 @@ export const RaceHud: React.FC<RaceHudProps> = ({
   onResetBike,
   onPause,
 }) => {
+  const [leaderboardPage, setLeaderboardPage] = useState(0);
+
+  useEffect(() => {
+    setLeaderboardPage(0);
+    if (hud.sessionType !== 'race') return;
+    const timer = window.setInterval(() => {
+      setLeaderboardPage((prev) => prev + 1);
+    }, LEADERBOARD_CYCLE_MS);
+    return () => window.clearInterval(timer);
+  }, [hud.sessionType, circuitId]);
+
   const minimapData = useMemo(() => buildMinimapGeometry(circuitId, 100, 12), [circuitId]);
+
+  const localLivery = useMemo(
+    () => getLiveryById(hud.localLiveryId, hud.bikeClass),
+    [hud.localLiveryId, hud.bikeClass],
+  );
 
   const orderedMinimapRiders = useMemo(() => {
     const ai: typeof hud.minimapRiders = [];
@@ -51,106 +74,157 @@ export const RaceHud: React.FC<RaceHudProps> = ({
     return [...ai, ...players];
   }, [hud.minimapRiders]);
 
-  const mobileStandings = useMemo(() => {
-    if (hud.leaderboard.length <= 5) return hud.leaderboard;
-    const top = hud.leaderboard.slice(0, 4);
-    if (top.some((r) => r.isPlayer)) {
-      return hud.leaderboard.slice(0, 5);
-    }
-    const playerEntry = hud.leaderboard.find((r) => r.isPlayer);
-    return playerEntry ? [...top, playerEntry] : hud.leaderboard.slice(0, 5);
-  }, [hud.leaderboard]);
+  const leaderboardSlice = useMemo(
+    () => getLeaderboardPageSlice(hud.leaderboard, leaderboardPage),
+    [hud.leaderboard, leaderboardPage],
+  );
+
+  // During pre-race commentary speaking: render pure 3D scene with zero text in layer
+  if (hud.preRaceActive) {
+    return null;
+  }
+
+  const weatherBadge =
+    hud.weatherPhase === 'rain'
+      ? {
+          label: 'RAIN PATCHES',
+          cls: 'bg-sky-950/90 border-sky-400/70 text-sky-200',
+          dotCls: 'bg-sky-400',
+        }
+      : hud.weatherPhase === 'clouds'
+      ? {
+          label: 'CLOUDS BUILDING',
+          cls: 'bg-slate-900/85 border-cyan-500/45 text-cyan-200',
+          dotCls: 'bg-cyan-400',
+        }
+      : {
+          label: 'CLEAR SKIES',
+          cls: 'bg-amber-950/75 border-amber-400/45 text-amber-200',
+          dotCls: 'bg-amber-400',
+        };
 
   return (
     <div className="fixed inset-0 z-10 pointer-events-none flex flex-col justify-between p-2.5 sm:p-5">
-      {/* Top Row: Minimal Position/Lap/Time + Live Leaderboard & Utility Buttons + Minimap */}
+      {/* Top Row: Colorful Telemetry Strip + Rotating Leaderboard + Minimap & Weather */}
       <div className="flex items-start justify-between gap-2 sm:gap-3">
-        {/* Left Column: Position/Lap/Time + Simple Live Leaderboard */}
+        {/* Left Column: Position/Lap/Time + Weather Badge + Rotating 1-5 / 6-10 / 11-15 Leaderboard */}
         <div className="flex flex-col items-start gap-1.5 sm:gap-2 min-w-0">
-          <div className="bg-[#090d14]/65 border border-white/12 rounded-lg px-2.5 py-1.5 sm:px-3.5 sm:py-2 flex items-center gap-2 sm:gap-3.5 shadow-md">
-            {hud.sessionType === 'qualifying' ? (
-              <div className="text-sm sm:text-xl font-black italic text-amber-400 uppercase tracking-wider leading-none">
-                QUALI
+          <div className="bg-[rgba(9,13,20,0.82)] border border-white/15 rounded-xl overflow-hidden shadow-lg">
+            <div className="moto-stripe-bar" />
+            <div className="px-2.5 py-1.5 sm:px-3.5 sm:py-2 flex items-center gap-2 sm:gap-3">
+              <div className="hidden sm:flex items-center">
+                <RiderMiniFace livery={localLivery} size="xs" showFlag />
               </div>
-            ) : (
-              <div className="text-base sm:text-2xl font-black italic text-white tabular-nums leading-none">
-                P{hud.rank}
-                <span className="hidden sm:inline text-xs font-bold text-slate-400 not-italic">/{hud.totalRiders}</span>
+
+              {hud.sessionType === 'qualifying' ? (
+                <div className="text-sm sm:text-xl font-black italic text-amber-400 uppercase tracking-wider leading-none font-display">
+                  QUALI
+                </div>
+              ) : (
+                <div className="text-base sm:text-2xl font-black italic text-white tabular-nums leading-none font-display">
+                  P{hud.rank}
+                  <span className="hidden sm:inline text-xs font-bold text-slate-400 not-italic">/{hud.totalRiders}</span>
+                </div>
+              )}
+
+              <div className="h-4 sm:h-5 w-px bg-white/15" />
+
+              <div className="text-base sm:text-2xl font-black italic text-white tabular-nums leading-none font-display">
+                <span className="text-[9px] sm:text-[10px] font-bold uppercase not-italic text-cyan-400 mr-0.5 sm:mr-1">L</span>
+                {hud.lap}
+                <span className="text-[10px] sm:text-xs font-bold text-slate-400 not-italic">/{hud.totalLaps}</span>
               </div>
-            )}
 
-            <div className="h-4 sm:h-5 w-px bg-white/15" />
+              <div className="h-4 sm:h-5 w-px bg-white/15" />
 
-            <div className="text-base sm:text-2xl font-black italic text-white tabular-nums leading-none">
-              <span className="text-[9px] sm:text-[10px] font-bold uppercase not-italic text-slate-400 mr-0.5 sm:mr-1">L</span>
-              {hud.lap}
-              <span className="text-[10px] sm:text-xs font-bold text-slate-400 not-italic">/{hud.totalLaps}</span>
-            </div>
-
-            <div className="h-4 sm:h-5 w-px bg-white/15" />
-
-            <div className="text-xs sm:text-base font-extrabold text-amber-400 tabular-nums leading-none">
-              {formatRaceTime(hud.currentLapMs)}
+              <div className="text-xs sm:text-base font-extrabold text-amber-300 tabular-nums leading-none font-mono">
+                {formatRaceTime(hud.currentLapMs)}
+              </div>
             </div>
           </div>
 
-          {hud.sessionType === 'race' && hud.leaderboard.length > 0 && (
+          <div
+            data-testid="weather-status-badge"
+            className={`border rounded-lg px-2.5 py-1 flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wider shadow-md ${weatherBadge.cls}`}
+          >
+            <span className={`w-2 h-2 rounded-full ${weatherBadge.dotCls}`} />
+            <span>{weatherBadge.label}</span>
+            {hud.rainPatches.length > 0 && (
+              <span className="text-sky-300 font-mono tabular-nums">
+                ({hud.rainPatches.length})
+              </span>
+            )}
+          </div>
+
+          {hud.sessionType === 'race' && leaderboardSlice.rows.length > 0 && (
             <div
               data-testid="live-leaderboard"
-              className="bg-[#090d14]/58 border border-white/10 rounded-lg px-2 py-1 sm:py-1.5 shadow-md w-[144px] sm:w-[176px]"
+              className="bg-[rgba(9,13,20,0.8)] border border-white/15 rounded-xl overflow-hidden shadow-lg w-[186px] sm:w-[222px]"
             >
-              {/* Full 10-rider standings on desktop */}
-              <div className="hidden sm:flex flex-col gap-0.5">
-                {hud.leaderboard.map((entry) => (
+              <div className="flex items-center justify-between px-2.5 py-1 bg-gradient-to-r from-red-600/35 via-amber-500/20 to-sky-500/25 border-b border-white/10">
+                <span
+                  data-testid="leaderboard-range"
+                  className="text-[9px] sm:text-[10px] font-black uppercase tracking-wider text-amber-300 tabular-nums font-display"
+                >
+                  POS {leaderboardSlice.rangeLabel}
+                </span>
+                <div className="flex items-center gap-1">
+                  {Array.from({ length: leaderboardSlice.totalPages }).map((_, idx) => (
+                    <span
+                      key={idx}
+                      className={`h-1 rounded-full transition-all ${
+                        idx === leaderboardSlice.pageIndex ? 'w-3 bg-amber-400' : 'w-1.5 bg-slate-600'
+                      }`}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-0.5 p-1.5">
+                {leaderboardSlice.rows.map((entry) => (
                   <div
                     key={entry.id}
-                    className={`flex items-center gap-1.5 px-1.5 py-0.5 rounded text-[11px] leading-tight ${
+                    className={`flex items-center gap-1.5 px-1.5 py-0.5 rounded text-[10px] sm:text-[11px] leading-tight ${
                       entry.isPlayer
-                        ? 'bg-red-600/35 text-white font-black'
-                        : 'text-slate-200 font-semibold'
+                        ? 'bg-gradient-to-r from-red-600/65 to-amber-500/30 text-white font-black border border-red-400/50'
+                        : 'text-slate-100 font-semibold'
                     }`}
                   >
-                    <span className="w-4 text-right tabular-nums text-slate-400 font-bold">{entry.rank}</span>
+                    <span className="w-4 text-right tabular-nums text-amber-300 font-bold">{entry.rank}</span>
                     <span
                       className="w-1 h-3 rounded-xs shrink-0"
                       style={{ backgroundColor: entry.color }}
                     />
+                    <NationalFlag code={entry.nationality} size="xs" />
                     <span className="truncate flex-1">{entry.name}</span>
                     {entry.crashed && (
-                      <span className="text-[9px] font-black text-orange-400 uppercase">OUT</span>
+                      <span className="text-[8px] sm:text-[9px] font-black text-orange-400 uppercase">OUT</span>
                     )}
                   </div>
                 ))}
-              </div>
 
-              {/* Compact 5-row standings on phone so bottom-left touch steer pad stays open */}
-              <div className="flex sm:hidden flex-col gap-0.5">
-                {mobileStandings.map((entry) => (
-                  <div
-                    key={entry.id}
-                    className={`flex items-center gap-1.5 px-1 py-0.5 rounded text-[10px] leading-tight ${
-                      entry.isPlayer
-                        ? 'bg-red-600/35 text-white font-black'
-                        : 'text-slate-200 font-semibold'
-                    }`}
-                  >
-                    <span className="w-3.5 text-right tabular-nums text-slate-400 font-bold">{entry.rank}</span>
-                    <span
-                      className="w-1 h-2.5 rounded-xs shrink-0"
-                      style={{ backgroundColor: entry.color }}
-                    />
-                    <span className="truncate flex-1">{entry.name}</span>
-                    {entry.crashed && (
-                      <span className="text-[8px] font-black text-orange-400 uppercase">OUT</span>
-                    )}
-                  </div>
-                ))}
+                {leaderboardSlice.pinnedPlayer && (
+                  <>
+                    <div className="my-0.5 border-t border-white/10" />
+                    <div className="flex items-center gap-1.5 px-1.5 py-0.5 rounded text-[10px] sm:text-[11px] leading-tight bg-gradient-to-r from-red-600/65 to-amber-500/30 text-white font-black border border-red-400/50">
+                      <span className="w-4 text-right tabular-nums text-amber-300 font-bold">
+                        {leaderboardSlice.pinnedPlayer.rank}
+                      </span>
+                      <span
+                        className="w-1 h-3 rounded-xs shrink-0"
+                        style={{ backgroundColor: leaderboardSlice.pinnedPlayer.color }}
+                      />
+                      <NationalFlag code={leaderboardSlice.pinnedPlayer.nationality} size="xs" />
+                      <span className="truncate flex-1">{leaderboardSlice.pinnedPlayer.name}</span>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
           )}
         </div>
 
-        {/* Minimalist Top-Right Controls & Small Minimap */}
+        {/* Top-Right Controls & Circuit Minimap with Wet Patches */}
         <div className="flex flex-col items-end gap-2 shrink-0">
           <div className="pointer-events-auto flex flex-wrap items-center justify-end gap-1 sm:gap-1.5 max-w-[196px] sm:max-w-none">
             <button
@@ -163,7 +237,7 @@ export const RaceHud: React.FC<RaceHudProps> = ({
                 e.currentTarget.blur();
                 onResetBike();
               }}
-              className="h-8 px-2 sm:h-9 sm:px-2.5 rounded-lg bg-[#090d14]/68 hover:bg-slate-800 border border-white/15 text-amber-300 flex items-center gap-1 text-[11px] font-bold uppercase tracking-wider cursor-pointer"
+              className="h-8 px-2 sm:h-9 sm:px-2.5 rounded-lg bg-[#090d14]/78 hover:bg-slate-800 border border-amber-400/40 text-amber-300 flex items-center gap-1 text-[11px] font-bold uppercase tracking-wider cursor-pointer"
             >
               <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.2">
                 <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
@@ -183,8 +257,8 @@ export const RaceHud: React.FC<RaceHudProps> = ({
               }}
               className={`w-8 h-8 sm:w-9 sm:h-9 rounded-lg border flex items-center justify-center cursor-pointer ${
                 bgmEnabled && !muted
-                  ? 'bg-[#090d14]/68 border-white/15 text-amber-300 hover:bg-slate-800'
-                  : 'bg-[#090d14]/68 border-white/10 text-slate-500 hover:bg-slate-800'
+                  ? 'bg-[#090d14]/78 border-cyan-400/40 text-cyan-300 hover:bg-slate-800'
+                  : 'bg-[#090d14]/78 border-white/10 text-slate-500 hover:bg-slate-800'
               }`}
             >
               <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2">
@@ -203,7 +277,7 @@ export const RaceHud: React.FC<RaceHudProps> = ({
                 e.currentTarget.blur();
                 onToggleMute();
               }}
-              className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg bg-[#090d14]/68 hover:bg-slate-800 border border-white/15 text-slate-100 flex items-center justify-center cursor-pointer"
+              className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg bg-[#090d14]/78 hover:bg-slate-800 border border-white/15 text-slate-100 flex items-center justify-center cursor-pointer"
             >
               <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M11 5L6 9H2v6h4l5 4V5z" />
@@ -224,7 +298,7 @@ export const RaceHud: React.FC<RaceHudProps> = ({
                 e.currentTarget.blur();
                 onCycleCamera();
               }}
-              className="h-8 px-2 sm:h-9 sm:px-2.5 rounded-lg bg-[#090d14]/68 hover:bg-slate-800 border border-white/15 text-slate-100 text-[10px] sm:text-[11px] font-bold uppercase tracking-wider cursor-pointer"
+              className="h-8 px-2 sm:h-9 sm:px-2.5 rounded-lg bg-[#090d14]/78 hover:bg-slate-800 border border-white/15 text-slate-100 text-[10px] sm:text-[11px] font-bold uppercase tracking-wider cursor-pointer"
             >
               {cameraMode}
             </button>
@@ -241,7 +315,7 @@ export const RaceHud: React.FC<RaceHudProps> = ({
               className={`w-8 h-8 sm:w-9 sm:h-9 rounded-lg border flex items-center justify-center cursor-pointer ${
                 touchEnabled
                   ? 'bg-emerald-950/85 border-emerald-500 text-emerald-300'
-                  : 'bg-[#090d14]/68 hover:bg-slate-800 border-white/15 text-slate-300'
+                  : 'bg-[#090d14]/78 hover:bg-slate-800 border-white/15 text-slate-300'
               }`}
             >
               <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2">
@@ -259,7 +333,7 @@ export const RaceHud: React.FC<RaceHudProps> = ({
                 e.currentTarget.blur();
                 onPause();
               }}
-              className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg bg-[#090d14]/68 hover:bg-slate-800 border border-white/15 text-slate-100 flex items-center justify-center cursor-pointer"
+              className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg bg-[#090d14]/78 hover:bg-slate-800 border border-white/15 text-slate-100 flex items-center justify-center cursor-pointer"
             >
               <svg viewBox="0 0 24 24" className="w-4 h-4" fill="currentColor">
                 <rect x="6" y="5" width="4" height="14" rx="1" />
@@ -271,10 +345,10 @@ export const RaceHud: React.FC<RaceHudProps> = ({
           <div
             data-testid="race-minimap"
             aria-label="Circuit mini map"
-            className="bg-[#090d14]/75 border border-white/15 rounded-lg p-1.5 shadow-lg"
+            className="bg-[#090d14]/82 border border-white/15 rounded-xl p-1.5 shadow-lg"
           >
             <svg viewBox={`0 0 ${minimapData.size} ${minimapData.size}`} className="w-20 h-20 sm:w-24 sm:h-24">
-              {/* Outer dark casing for high contrast against sky/grandstands */}
+              {/* Outer dark casing */}
               <path
                 d={minimapData.pathD}
                 fill="none"
@@ -292,6 +366,22 @@ export const RaceHud: React.FC<RaceHudProps> = ({
                 strokeLinejoin="round"
                 strokeLinecap="round"
               />
+              {/* Random rain patches displayed on minimap so players spot wet tarmac */}
+              {hud.rainPatches.map((patch) => {
+                const pt = projectPointToMinimap(patch.x, patch.z, minimapData);
+                return (
+                  <circle
+                    key={patch.id}
+                    cx={pt.x}
+                    cy={pt.y}
+                    r={3.2}
+                    fill="#38bdf8"
+                    fillOpacity="0.52"
+                    stroke="#bae6fd"
+                    strokeWidth="0.7"
+                  />
+                );
+              })}
               {/* Start/Finish line marker */}
               <line
                 x1={minimapData.startLine.x1}
@@ -354,32 +444,44 @@ export const RaceHud: React.FC<RaceHudProps> = ({
         </div>
       </div>
 
-      {/* Transient Start Lights / Crashed Alert / Wrong Way */}
-      <div className="flex flex-col items-center justify-center -translate-y-14">
+      {/* Center Broadcast Zone: Start Lights, Wet Patch Warning, Crash, Wrong Way */}
+      <div className="flex flex-col items-center justify-center -translate-y-6 sm:-translate-y-10 px-2">
         {hud.countdownStage >= 0 && (
-          <div className="bg-[#090d14]/82 border border-white/15 rounded-xl px-6 py-3 shadow-xl text-center">
-            <div className="flex items-center gap-2.5 justify-center mb-1.5">
-              {[0, 1, 2, 3, 4].map((idx) => {
-                const isGo = hud.countdownStage === 0;
-                const lit =
-                  isGo ||
-                  (hud.countdownStage === 3 && idx < 2) ||
-                  (hud.countdownStage === 2 && idx < 4) ||
-                  hud.countdownStage === 1;
-                return (
-                  <span
-                    key={idx}
-                    className="w-4 h-4 rounded-full border border-slate-600"
-                    style={{
-                      backgroundColor: isGo ? '#22c55e' : lit ? '#ef4444' : '#1e293b',
-                    }}
-                  />
-                );
-              })}
+          <div className="bg-[rgba(9,13,20,0.88)] border border-white/15 rounded-2xl overflow-hidden shadow-2xl text-center">
+            <div className="moto-stripe-bar" />
+            <div className="px-6 py-3">
+              <div className="flex items-center gap-2.5 justify-center mb-1.5">
+                {[0, 1, 2, 3, 4].map((idx) => {
+                  const isGo = hud.countdownStage === 0;
+                  const lit =
+                    isGo ||
+                    (hud.countdownStage === 3 && idx < 2) ||
+                    (hud.countdownStage === 2 && idx < 4) ||
+                    hud.countdownStage === 1;
+                  return (
+                    <span
+                      key={idx}
+                      className="w-4 h-4 rounded-full border border-slate-600"
+                      style={{
+                        backgroundColor: isGo ? '#22c55e' : lit ? '#ef4444' : '#1e293b',
+                      }}
+                    />
+                  );
+                })}
+              </div>
+              <div className="text-3xl font-black italic tracking-wider text-white hud-stroke tabular-nums font-display">
+                {hud.countdownStage === 0 ? 'GO!' : hud.countdownStage}
+              </div>
             </div>
-            <div className="text-3xl font-black italic tracking-wider text-white hud-stroke tabular-nums">
-              {hud.countdownStage === 0 ? 'GO!' : hud.countdownStage}
-            </div>
+          </div>
+        )}
+
+        {hud.onRainPatch && !hud.crashed && !hud.preRaceActive && (
+          <div
+            data-testid="wet-patch-warning"
+            className="mt-2 bg-sky-950/90 border border-sky-400 rounded-lg px-4 py-1 text-sky-100 font-black uppercase tracking-widest text-[11px] shadow-lg"
+          >
+            WET PATCH · ADJUST RACING LINE
           </div>
         )}
 
@@ -412,53 +514,61 @@ export const RaceHud: React.FC<RaceHudProps> = ({
         )}
       </div>
 
-      {/* Minimalist Bottom Speed + Gear + Slim RPM & KERS Bars */}
+      {/* Bottom Speed + Gear + Vibrant RPM & KERS Bars */}
       <div
         className={`flex ${
           touchEnabled ? 'items-end justify-start mb-20' : 'items-end justify-center sm:justify-end'
         }`}
       >
         <div
-          className={`bg-[#090d14]/65 border border-white/12 shadow-lg ${
-            touchEnabled ? 'rounded-lg px-3 py-1.5 min-w-[140px]' : 'rounded-xl px-4 py-2.5 min-w-[175px]'
+          className={`bg-[#090d14]/82 border border-white/15 shadow-xl overflow-hidden ${
+            touchEnabled ? 'rounded-xl min-w-[144px]' : 'rounded-2xl min-w-[190px]'
           }`}
         >
-          <div className="flex items-baseline justify-between gap-3">
-            <div>
-              <span
-                data-testid="hud-speed"
-                className={`${
-                  touchEnabled ? 'text-2xl' : 'text-3xl sm:text-4xl'
-                } font-black italic text-white tabular-nums leading-none`}
-              >
-                {hud.speedKmh}
-              </span>
-              <span className="ml-1 text-[10px] font-bold uppercase text-slate-400">KM/H</span>
+          <div className="moto-stripe-bar" />
+          <div className={touchEnabled ? 'px-3 py-1.5' : 'px-4 py-2.5'}>
+            <div className="flex items-baseline justify-between gap-3">
+              <div>
+                <span
+                  data-testid="hud-speed"
+                  className={`${
+                    touchEnabled ? 'text-2xl' : 'text-3xl sm:text-4xl'
+                  } font-black italic text-white tabular-nums leading-none font-display`}
+                >
+                  {hud.speedKmh}
+                </span>
+                <span className="ml-1 text-[10px] font-bold uppercase text-cyan-400">KM/H</span>
+              </div>
+
+              <div className="text-right font-black text-amber-400 tabular-nums leading-none font-display">
+                <span className="text-[10px] text-slate-400 mr-0.5">G</span>
+                <span data-testid="hud-gear" className={touchEnabled ? 'text-lg' : 'text-xl'}>
+                  {hud.gear}
+                </span>
+              </div>
             </div>
 
-            <div className="text-right font-black text-amber-400 tabular-nums leading-none">
-              <span className="text-[10px] text-slate-400 mr-0.5">G</span>
-              <span data-testid="hud-gear" className={touchEnabled ? 'text-lg' : 'text-xl'}>
-                {hud.gear}
-              </span>
+            <div className="mt-1.5 h-1.5 bg-slate-800/95 rounded-full overflow-hidden">
+              <div
+                className="h-full transition-all duration-75"
+                style={{
+                  width: `${Math.round(hud.rpmRatio * 100)}%`,
+                  background:
+                    hud.rpmRatio > 0.85
+                      ? 'linear-gradient(90deg, #f59e0b, #ef4444)'
+                      : hud.rpmRatio > 0.6
+                      ? 'linear-gradient(90deg, #38bdf8, #f59e0b)'
+                      : '#38bdf8',
+                }}
+              />
             </div>
-          </div>
 
-          <div className="mt-1.5 h-1.5 bg-slate-800/90 rounded-full overflow-hidden">
-            <div
-              className="h-full transition-all duration-75"
-              style={{
-                width: `${Math.round(hud.rpmRatio * 100)}%`,
-                backgroundColor: hud.rpmRatio > 0.85 ? '#ef4444' : hud.rpmRatio > 0.65 ? '#f59e0b' : '#38bdf8',
-              }}
-            />
-          </div>
-
-          <div className="mt-1 h-1 bg-slate-800/90 rounded-full overflow-hidden">
-            <div
-              className="h-full bg-cyan-400 transition-all duration-75"
-              style={{ width: `${hud.boostFuel}%` }}
-            />
+            <div className="mt-1 h-1 bg-slate-800/95 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-gradient-to-r from-cyan-400 to-emerald-400 transition-all duration-75"
+                style={{ width: `${hud.boostFuel}%` }}
+              />
+            </div>
           </div>
         </div>
       </div>

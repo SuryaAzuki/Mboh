@@ -11,7 +11,18 @@
     overflow: hidden;
     background-color: #0b0f17;
     touch-action: none;
-    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-family: "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+
+  h1,
+  h2,
+  h3,
+  .font-display {
+    font-family: "Chakra Petch", "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  }
+
+  .font-mono {
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   }
 }
 
@@ -21,6 +32,10 @@
 
 .hud-stroke {
   paint-order: stroke fill;
-  -webkit-text-stroke: 3px rgba(7, 10, 16, 0.85);
-  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.75);
+  -webkit-text-stroke: 3px rgba(7, 10, 16, 0.88);
+  text-shadow: 0 3px 12px rgba(0, 0, 0, 0.82);
+}
+
+.moto-stripe-bar {
+  background: linear-gradient(90deg, #ef4444 0%, #f59e0b 38%, #06b6d4 72%, #10b981 100%);
 }
